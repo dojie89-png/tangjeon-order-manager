@@ -21,7 +21,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "12.43"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "12.42"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1526,17 +1526,9 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         receiver_phone = clean_text(base_row.get("받는분_휴대폰", "") or base_row.get("받는분_전화", ""))
         sender_phone = clean_text(base_row.get("보내는분_전화", "") or base_row.get("보내는분_휴대폰", ""))
         if not _is_valid_phone(sender_phone):
-            rep = _lookup_rep_phone(base_row.get("한의원명", ""), base_row.get("보내는분", ""))
-            if not rep:
-                # 고래한방 지점은 GORAE_BRANCH_SENDER에서 전화번호 조회
-                haystack = clean_text(
-                    f"{base_row.get('한의원명', '')} {base_row.get('보내는분', '')} {base_row.get('보내는분_주소', '')}"
-                )
-                for branch, info in GORAE_BRANCH_SENDER.items():
-                    if branch in haystack:
-                        rep = info.get("phone", "")
-                        break
-            sender_phone = rep or sender_phone
+            sender_phone = _lookup_rep_phone(
+                base_row.get("한의원명", ""), base_row.get("보내는분", "")
+            ) or sender_phone
         return [
             ordercode_str,                                       # A 고객주문번호
             clean_text(base_row.get("한의원명", "")),             # B 상호

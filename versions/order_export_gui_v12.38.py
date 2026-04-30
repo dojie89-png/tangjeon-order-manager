@@ -21,7 +21,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "12.43"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "12.38"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -72,7 +72,6 @@ HOSPITAL_PRESETS = [
     "청주필한방병원",
     "대전필한방병원",
     "약손한의원",
-    "본가한의원",
     "대전굿니스한의원",
     "보강한방병원",
     "개금365한의원",
@@ -88,7 +87,6 @@ HOSPITAL_SEARCH_MAP = {
     "청주필한방병원": ["청주필"],
     "대전필한방병원": ["대전필"],
     "약손한의원": ["약손"],
-    "본가한의원": ["본가"],
     "대전굿니스한의원": ["굿니스"],
     "보강한방병원": ["보강"],
     "개금365한의원": ["개금"],
@@ -948,26 +946,13 @@ def get_printer_list() -> list:
     try:
         if sys.platform == "win32":
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-Printer | Select-Object -ExpandProperty Name"],
-                capture_output=True, text=True, timeout=10,
-                creationflags=0x08000000  # CREATE_NO_WINDOW
+                ["wmic", "printer", "get", "name"],
+                capture_output=True, text=True, timeout=5
             )
-            if result.returncode == 0 and result.stdout.strip():
-                for line in result.stdout.splitlines():
-                    name = line.strip()
-                    if name:
-                        printers.append(name)
-            else:
-                # PowerShell 실패 시 wmic fallback
-                result2 = subprocess.run(
-                    ["wmic", "printer", "get", "name"],
-                    capture_output=True, text=True, timeout=5
-                )
-                for line in result2.stdout.splitlines():
-                    name = line.strip()
-                    if name and name.lower() != "name":
-                        printers.append(name)
+            for line in result.stdout.splitlines():
+                name = line.strip()
+                if name and name.lower() != "name":
+                    printers.append(name)
         else:  # macOS / Linux
             result = subprocess.run(
                 ["lpstat", "-p"],
@@ -1272,8 +1257,6 @@ def get_gorae_branch(text: str) -> str:
 
 
 GORAE_PANAK_CODE_MAP = {
-    "위당귀수산": "WDGSS",
-    "위당귀수산(평위산 합방)": "WDGSS",
     "위당귀수산(평위산합방)": "WDGSS",
     "위당귀수산 제1가감": "WDGSS1",
     "위당귀수산 제2가감": "WDGSS2",
@@ -1367,17 +1350,9 @@ def export_label_excel(xlsx_path: str):
     # 처방명에서 괄호 내용 분리: "오적산(소아)" → 처방명="오적산", 처방비고="소아"
     def _split_pres(v):
         s = clean_text(str(v or ''))
-        # 1. 괄호 내용 분리: "오적산(소아)" → ("오적산", "소아")
         m = re.search(r'\(([^)]+)\)\s*$', s)
         if m:
             return s[:m.start()].strip(), m.group(1).strip()
-        # 2. 한자 분리: 끝에 붙은 한자(漢字)를 비고로 "작약감초탕 芍藥甘草湯" → ("작약감초탕", "芍藥甘草湯")
-        m2 = re.search(r'[一-鿿㐀-䶿豈-﫿]+\s*$', s)
-        if m2:
-            hanja = m2.group(0).strip()
-            before = s[:m2.start()].strip()
-            if before:  # 한자만 있는 처방명이 아닌 경우에만 분리
-                return before, hanja
         return s, ''
 
     if '처방명' in label_df.columns:
@@ -1472,19 +1447,23 @@ def _is_valid_phone(val: str) -> bool:
 # ---------- CJ 파일접수 양식 생성 ----------
 # 실제 업로드 파일 기준 컬럼 순서 (A-Q, 17컬럼)
 _CJ_COLUMNS = [
-    "고객주문번호",               # A
-    "상호",                      # B
-    "받는분성명",                 # C
-    "받는분전화번호",             # D
-    "받는분주소(전체, 분할)",      # E
-    "품목명",                    # F
-    "운임구분",                  # G
-    "기본운임",                  # H
-    "박스수량",                  # I
-    "보내는분성명",              # J
-    "보내는분전화번호",           # K
-    "보내는분주소(전체, 분할)",   # L
-    "배송메세지1",               # M
+    "",  # A (blank)
+    "",  # B (blank)
+    "고객주문번호",               # C
+    "상호",                      # D
+    "받는분성명",                 # E
+    "받는분주소(전체, 분할)",      # F
+    "",  # G (blank — 주소 분할 2번째)
+    "받는분전화번호",             # H
+    "받는분기타연락처",           # I
+    "품목명",                    # J
+    "운임구분",                  # K
+    "기본운임",                  # L
+    "박스수량",                  # M
+    "배송메세지1",               # N  ← 메세지(원본 그대로)
+    "보내는분성명",              # O
+    "보내는분전화번호",           # P
+    "보내는분주소(전체, 분할)",   # Q
 ]
 
 
@@ -1498,13 +1477,10 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return ""
         return re.sub(r"[^0-9]", "", str(val)).strip()
 
-    _FORCE_DOSAGE_KW = {"약손", "본가"}
-
     def is_yakson(row) -> bool:
-        """복용법 강제 포함 병원 여부 판정 (약손한의원, 본가한의원)"""
+        """약손한의원 여부 판정"""
         for field in ["한의원명", "보내는분", "회원명"]:
-            val = clean_text(str(row.get(field, "") or ""))
-            if any(kw in val for kw in _FORCE_DOSAGE_KW):
+            if "약손" in clean_text(str(row.get(field, "") or "")):
                 return True
         return False
 
@@ -1526,31 +1502,27 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         receiver_phone = clean_text(base_row.get("받는분_휴대폰", "") or base_row.get("받는분_전화", ""))
         sender_phone = clean_text(base_row.get("보내는분_전화", "") or base_row.get("보내는분_휴대폰", ""))
         if not _is_valid_phone(sender_phone):
-            rep = _lookup_rep_phone(base_row.get("한의원명", ""), base_row.get("보내는분", ""))
-            if not rep:
-                # 고래한방 지점은 GORAE_BRANCH_SENDER에서 전화번호 조회
-                haystack = clean_text(
-                    f"{base_row.get('한의원명', '')} {base_row.get('보내는분', '')} {base_row.get('보내는분_주소', '')}"
-                )
-                for branch, info in GORAE_BRANCH_SENDER.items():
-                    if branch in haystack:
-                        rep = info.get("phone", "")
-                        break
-            sender_phone = rep or sender_phone
+            sender_phone = _lookup_rep_phone(
+                base_row.get("한의원명", ""), base_row.get("보내는분", "")
+            ) or sender_phone
         return [
-            ordercode_str,                                       # A 고객주문번호
-            clean_text(base_row.get("한의원명", "")),             # B 상호
-            clean_text(base_row.get("받는분", "")),              # C 받는분성명
-            receiver_phone,                                      # D 받는분전화번호
-            clean_text(base_row.get("받는분_주소", "")),          # E 받는분주소
-            f"한약({품명_str})",                                   # F 품목명
-            "신용",                                              # G 운임구분
-            2800,                                               # H 기본운임
-            1,                                                  # I 박스수량
-            clean_text(base_row.get("보내는분", "")),             # J 보내는분성명
-            sender_phone,                                        # K 보내는분전화번호
-            clean_text(base_row.get("보내는분_주소", "")),         # L 보내는분주소
-            clean_text(base_row.get("배송시메모", "")),           # M 배송메세지1
+            "",                                                  # A blank
+            "",                                                  # B blank
+            ordercode_str,                                       # C 고객주문번호
+            clean_text(base_row.get("한의원명", "")),             # D 상호
+            clean_text(base_row.get("받는분", "")),              # E 받는분성명
+            clean_text(base_row.get("받는분_주소", "")),          # F 받는분주소
+            "",                                                  # G blank (주소 분할 2)
+            receiver_phone,                                      # H 받는분전화번호
+            "",                                                  # I 받는분기타연락처
+            f"한약({품명_str})",                                   # J 품목명
+            "신용",                                              # K 운임구분
+            2800,                                               # L 기본운임
+            1,                                                  # M 박스수량
+            clean_text(base_row.get("배송시메모", "")),           # N 배송메세지1
+            clean_text(base_row.get("보내는분", "")),             # O 보내는분성명
+            sender_phone,                                        # P 보내는분전화번호
+            clean_text(base_row.get("보내는분_주소", "")),         # Q 보내는분주소
         ]
 
     # CJ 양식 제외 판정
@@ -1980,6 +1952,7 @@ def run_job(settings: dict, progress_callback=None):
                     if "고래" in hospital_name and not dispensing_note:
                         msg = f"⚠ 조제지시사항 공란 — 입원 판정 불가 (탕전페이지 취득 실패 가능성): {ordercode} {patient_name}"
                         print(f"    -> {msg}")
+                        missed_print_logs.append(f"[조제지시사항 공란] {ordercode} {patient_name}")
 
                     # 접수대기 → 입금대기 자동 전환 (입원 건)
                     if settings.get("auto_change_status") and status == "접수대기" and "입원" in dispensing_note:
@@ -2974,19 +2947,23 @@ def build_bulk_cj_upload_df(branch_groups: dict) -> pd.DataFrame:
             if not _is_valid_phone(receiver_phone):
                 receiver_phone = ""
             rows.append([
-                group_id,                                             # A 고객주문번호
-                f"고래한방병원_{branch}",                              # B 상호
-                first["receiver_name"],                               # C 받는분성명
-                receiver_phone,                                       # D 받는분전화번호
-                first["receiver_address"],                            # E 받는분주소
-                "한약",                                               # F 품목명
-                "",                                                   # G 운임구분
-                "",                                                   # H 기본운임
-                1,                                                    # I 박스수량
-                sender_info.get("name", f"고래한방병원_{branch}"),    # J 보내는분성명
-                sender_info.get("phone", ""),                         # K 보내는분전화번호
-                sender_info.get("address", ""),                       # L 보내는분주소
-                "",                                                   # M 배송메시지
+                "",                                                   # A
+                "",                                                   # B
+                group_id,                                             # C 고객주문번호
+                f"고래한방병원_{branch}",                              # D 상호
+                first["receiver_name"],                               # E 받는분성명
+                first["receiver_address"],                            # F 받는분주소
+                "",                                                   # G 주소분할2
+                receiver_phone,                                       # H 받는분전화번호
+                "",                                                   # I 기타연락처
+                "한약",                                               # J 품목명
+                "",                                                   # K 운임구분
+                "",                                                   # L 기본운임
+                1,                                                    # M 박스수량
+                "",                                                   # N 배송메시지
+                sender_info.get("name", f"고래한방병원_{branch}"),    # O 보내는분성명
+                sender_info.get("phone", ""),                         # P 보내는분전화번호
+                sender_info.get("address", ""),                       # Q 보내는분주소
             ])
     return pd.DataFrame(rows, columns=_CJ_COLUMNS)
 

@@ -21,7 +21,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "12.43"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "12.41"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1472,19 +1472,23 @@ def _is_valid_phone(val: str) -> bool:
 # ---------- CJ 파일접수 양식 생성 ----------
 # 실제 업로드 파일 기준 컬럼 순서 (A-Q, 17컬럼)
 _CJ_COLUMNS = [
-    "고객주문번호",               # A
-    "상호",                      # B
-    "받는분성명",                 # C
-    "받는분전화번호",             # D
-    "받는분주소(전체, 분할)",      # E
-    "품목명",                    # F
-    "운임구분",                  # G
-    "기본운임",                  # H
-    "박스수량",                  # I
-    "보내는분성명",              # J
-    "보내는분전화번호",           # K
-    "보내는분주소(전체, 분할)",   # L
-    "배송메세지1",               # M
+    "",  # A (blank)
+    "",  # B (blank)
+    "고객주문번호",               # C
+    "상호",                      # D
+    "받는분성명",                 # E
+    "받는분주소(전체, 분할)",      # F
+    "",  # G (blank — 주소 분할 2번째)
+    "받는분전화번호",             # H
+    "받는분기타연락처",           # I
+    "품목명",                    # J
+    "운임구분",                  # K
+    "기본운임",                  # L
+    "박스수량",                  # M
+    "배송메세지1",               # N  ← 메세지(원본 그대로)
+    "보내는분성명",              # O
+    "보내는분전화번호",           # P
+    "보내는분주소(전체, 분할)",   # Q
 ]
 
 
@@ -1526,31 +1530,27 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         receiver_phone = clean_text(base_row.get("받는분_휴대폰", "") or base_row.get("받는분_전화", ""))
         sender_phone = clean_text(base_row.get("보내는분_전화", "") or base_row.get("보내는분_휴대폰", ""))
         if not _is_valid_phone(sender_phone):
-            rep = _lookup_rep_phone(base_row.get("한의원명", ""), base_row.get("보내는분", ""))
-            if not rep:
-                # 고래한방 지점은 GORAE_BRANCH_SENDER에서 전화번호 조회
-                haystack = clean_text(
-                    f"{base_row.get('한의원명', '')} {base_row.get('보내는분', '')} {base_row.get('보내는분_주소', '')}"
-                )
-                for branch, info in GORAE_BRANCH_SENDER.items():
-                    if branch in haystack:
-                        rep = info.get("phone", "")
-                        break
-            sender_phone = rep or sender_phone
+            sender_phone = _lookup_rep_phone(
+                base_row.get("한의원명", ""), base_row.get("보내는분", "")
+            ) or sender_phone
         return [
-            ordercode_str,                                       # A 고객주문번호
-            clean_text(base_row.get("한의원명", "")),             # B 상호
-            clean_text(base_row.get("받는분", "")),              # C 받는분성명
-            receiver_phone,                                      # D 받는분전화번호
-            clean_text(base_row.get("받는분_주소", "")),          # E 받는분주소
-            f"한약({품명_str})",                                   # F 품목명
-            "신용",                                              # G 운임구분
-            2800,                                               # H 기본운임
-            1,                                                  # I 박스수량
-            clean_text(base_row.get("보내는분", "")),             # J 보내는분성명
-            sender_phone,                                        # K 보내는분전화번호
-            clean_text(base_row.get("보내는분_주소", "")),         # L 보내는분주소
-            clean_text(base_row.get("배송시메모", "")),           # M 배송메세지1
+            "",                                                  # A blank
+            "",                                                  # B blank
+            ordercode_str,                                       # C 고객주문번호
+            clean_text(base_row.get("한의원명", "")),             # D 상호
+            clean_text(base_row.get("받는분", "")),              # E 받는분성명
+            clean_text(base_row.get("받는분_주소", "")),          # F 받는분주소
+            "",                                                  # G blank (주소 분할 2)
+            receiver_phone,                                      # H 받는분전화번호
+            "",                                                  # I 받는분기타연락처
+            f"한약({품명_str})",                                   # J 품목명
+            "신용",                                              # K 운임구분
+            2800,                                               # L 기본운임
+            1,                                                  # M 박스수량
+            clean_text(base_row.get("배송시메모", "")),           # N 배송메세지1
+            clean_text(base_row.get("보내는분", "")),             # O 보내는분성명
+            sender_phone,                                        # P 보내는분전화번호
+            clean_text(base_row.get("보내는분_주소", "")),         # Q 보내는분주소
         ]
 
     # CJ 양식 제외 판정
@@ -2974,19 +2974,23 @@ def build_bulk_cj_upload_df(branch_groups: dict) -> pd.DataFrame:
             if not _is_valid_phone(receiver_phone):
                 receiver_phone = ""
             rows.append([
-                group_id,                                             # A 고객주문번호
-                f"고래한방병원_{branch}",                              # B 상호
-                first["receiver_name"],                               # C 받는분성명
-                receiver_phone,                                       # D 받는분전화번호
-                first["receiver_address"],                            # E 받는분주소
-                "한약",                                               # F 품목명
-                "",                                                   # G 운임구분
-                "",                                                   # H 기본운임
-                1,                                                    # I 박스수량
-                sender_info.get("name", f"고래한방병원_{branch}"),    # J 보내는분성명
-                sender_info.get("phone", ""),                         # K 보내는분전화번호
-                sender_info.get("address", ""),                       # L 보내는분주소
-                "",                                                   # M 배송메시지
+                "",                                                   # A
+                "",                                                   # B
+                group_id,                                             # C 고객주문번호
+                f"고래한방병원_{branch}",                              # D 상호
+                first["receiver_name"],                               # E 받는분성명
+                first["receiver_address"],                            # F 받는분주소
+                "",                                                   # G 주소분할2
+                receiver_phone,                                       # H 받는분전화번호
+                "",                                                   # I 기타연락처
+                "한약",                                               # J 품목명
+                "",                                                   # K 운임구분
+                "",                                                   # L 기본운임
+                1,                                                    # M 박스수량
+                "",                                                   # N 배송메시지
+                sender_info.get("name", f"고래한방병원_{branch}"),    # O 보내는분성명
+                sender_info.get("phone", ""),                         # P 보내는분전화번호
+                sender_info.get("address", ""),                       # Q 보내는분주소
             ])
     return pd.DataFrame(rows, columns=_CJ_COLUMNS)
 
