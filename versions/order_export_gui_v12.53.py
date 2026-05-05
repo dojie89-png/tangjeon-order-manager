@@ -21,7 +21,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "12.51"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "12.53"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1637,11 +1637,13 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         return re.sub(r'\s+', '', clean_text(str(val) if val else ""))
 
     # -----------------------------------------------------------
-    # pre-pass: [묶음] 주문에서 전화번호별 카운트 집계
-    # → 동일 전화번호를 가진 [묶음] 주문이 2개 이상이면 전화번호로 묶음
-    # → 1개뿐이면 주소로 폴백 (한 가정에서 다른 이름/전화로 각각 주문한 경우 대응)
+    # pre-pass: [묶음] 주문에서 전화번호별 카운트·주소 집계
+    # → 동일 전화번호를 가진 [묶음] 주문이 2개 이상 AND 모두 동일 배송지 → 전화 키로 묶음
+    # → 주소가 다르면 전화 키 사용 안 함 (배송지 다른 사람까지 오묶음 방지)
+    # → [묶음]이 1건뿐이면 주소로 폴백
     # -----------------------------------------------------------
     bundle_phone_counter: dict = {}
+    bundle_phone_addrs: dict = {}   # ph → 해당 전화의 [묶음] 주문 주소 집합
     for row in master_results:
         if clean_text(row.get("배송구분", "")) == "방문수령":
             continue
@@ -1651,9 +1653,15 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             ph = norm_phone(row.get("받는분_휴대폰", "") or row.get("받는분_전화", ""))
             if ph:
                 bundle_phone_counter[ph] = bundle_phone_counter.get(ph, 0) + 1
+                addr = norm_addr(row.get("받는분_주소", ""))
+                bundle_phone_addrs.setdefault(ph, set()).add(addr)
 
-    # 전화번호로 묶을 수 있는 경우 (같은 전화의 [묶음] 주문이 2개 이상)
-    multi_bundle_phones = {ph for ph, cnt in bundle_phone_counter.items() if cnt >= 2}
+    # 전화번호로 묶을 수 있는 경우:
+    #   같은 전화의 [묶음] 주문이 2개 이상 AND 모두 동일 배송지(주소 종류 1개)
+    multi_bundle_phones = {
+        ph for ph, cnt in bundle_phone_counter.items()
+        if cnt >= 2 and len(bundle_phone_addrs.get(ph, set())) == 1
+    }
 
     # -----------------------------------------------------------
     # 1단계: bundle_key_set 구성
@@ -1903,16 +1911,23 @@ def run_job(settings: dict, progress_callback=None):
                     list_name = item["list_name"]
                     list_extra = item["list_extra"]
 
-                    # 목록 날짜로 사전 필터 — 범위 밖이면 상세 방문 없이 건너뜀
+                    # 목록 날짜로 사전 필터 — 날짜(연월일)만 비교해 명확히 범위 밖인 경우만 제외
+                    # ※ 시간까지 비교하면 목록의 row_date가 주문날짜가 아닌 다른 날짜 컬럼을
+                    #   잘못 잡았을 때 정상 주문이 오제외되는 버그 있음 → 날짜만 비교
                     if (filter_start_dt or filter_end_dt) and item.get("row_date"):
                         row_dt = parse_order_datetime_obj(item["row_date"])
                         if row_dt:
-                            if filter_start_dt and row_dt < filter_start_dt:
-                                print(f"  -> 목록 날짜 범위 전, 건너뜀: {item['row_date']}")
-                                continue
-                            if filter_end_dt and row_dt > filter_end_dt:
-                                print(f"  -> 목록 날짜 범위 후, 건너뜀: {item['row_date']}")
-                                continue
+                            row_date_only = row_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                            if filter_start_dt:
+                                start_date_only = filter_start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                                if row_date_only < start_date_only:
+                                    print(f"  -> 목록 날짜 범위 전(날짜 기준), 건너뜀: {item['row_date']}")
+                                    continue
+                            if filter_end_dt:
+                                end_date_only = filter_end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                                if row_date_only > end_date_only:
+                                    print(f"  -> 목록 날짜 범위 후(날짜 기준), 건너뜀: {item['row_date']}")
+                                    continue
 
                     print(f"  [{page_no}페이지 {idx}/{len(detail_rows)}] 확인 중: {list_name} {list_extra}")
                     update_progress(40, f"데이터 수집 중... ({processed_count}건 완료 | {page_no}p {idx}/{len(detail_rows)})")
@@ -2697,14 +2712,19 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
                 href = item["href"]
                 list_extra = item["list_extra"]
 
-                # 목록 날짜로 사전 필터 — 범위 밖이면 상세 방문 없이 건너뜀
+                # 목록 날짜로 사전 필터 — 날짜(연월일)만 비교
                 if (filter_start_dt or filter_end_dt) and item.get("row_date"):
                     row_dt = parse_order_datetime_obj(item["row_date"])
                     if row_dt:
-                        if filter_start_dt and row_dt < filter_start_dt:
-                            continue
-                        if filter_end_dt and row_dt > filter_end_dt:
-                            continue
+                        row_date_only = row_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                        if filter_start_dt:
+                            start_date_only = filter_start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                            if row_date_only < start_date_only:
+                                continue
+                        if filter_end_dt:
+                            end_date_only = filter_end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                            if row_date_only > end_date_only:
+                                continue
 
                 driver.get(href)
                 time.sleep(1.5)
@@ -2977,15 +2997,20 @@ def run_bulk_scan(start_date: str = "", end_date: str = "",
                     if session_dead:
                         break
 
-                    # 날짜 사전 필터
+                    # 날짜 사전 필터 — 날짜(연월일)만 비교
                     if (filter_start_dt or filter_end_dt) and item.get("row_date"):
                         row_dt = parse_order_datetime_obj(item["row_date"])
                         if row_dt:
-                            if filter_start_dt and row_dt < filter_start_dt:
-                                continue
-                            if filter_end_dt and row_dt > filter_end_dt:
-                                page_exhausted = True
-                                break
+                            row_date_only = row_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                            if filter_start_dt:
+                                start_date_only = filter_start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                                if row_date_only < start_date_only:
+                                    continue
+                            if filter_end_dt:
+                                end_date_only = filter_end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                                if row_date_only > end_date_only:
+                                    page_exhausted = True
+                                    break
 
                     # 고래한방 사전 필터 — 전체 행 텍스트(한의원명 열 포함)로 검사
                     row_text = item.get("row_text") or (item.get("list_name", "") + " " + item.get("list_extra", ""))
@@ -3320,7 +3345,7 @@ def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None
                 if len(patient) > 30:
                     patient = ""
 
-                # 시간 포함 날짜 필터 — 목록 행에서 날짜 패턴 탐색
+                # 날짜 필터 — 목록 행에서 날짜 패턴 탐색 (날짜 기준으로만 비교)
                 if filter_start_dt or filter_end_dt:
                     row_date_str = ""
                     for cell in cells:
@@ -3330,10 +3355,15 @@ def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None
                     if row_date_str:
                         order_dt = parse_order_datetime_obj(row_date_str)
                         if order_dt:
-                            if filter_start_dt and order_dt < filter_start_dt:
-                                continue
-                            if filter_end_dt and order_dt > filter_end_dt:
-                                continue
+                            order_date_only = order_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                            if filter_start_dt:
+                                start_date_only = filter_start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                                if order_date_only < start_date_only:
+                                    continue
+                            if filter_end_dt:
+                                end_date_only = filter_end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                                if order_date_only > end_date_only:
+                                    continue
 
                 shipped_orders.append({
                     "seqno": seqno,
