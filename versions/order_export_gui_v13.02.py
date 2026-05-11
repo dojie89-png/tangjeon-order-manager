@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.03"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.02"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"

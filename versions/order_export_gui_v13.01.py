@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.03"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.01"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -4021,35 +4021,6 @@ def _parse_shop_order_list_page(html: str) -> list:
     return results
 
 
-def _parse_payment_str(raw: str) -> dict:
-    """결제금액 문자열 → 총액/처방비용/배송료/포인트 분리.
-
-    예시 H형: "561,000 원 (처방비용 : 561,000 | 배송료: 0 | 포인트: 0)"
-    예시 C형: "390000 (처방비용 : 390,000 | 배송료: 0)"
-    """
-    import re
-    result = {"결제금액_총액": "", "처방비용": "", "배송료": "", "포인트": ""}
-    if not raw:
-        return result
-    # 총액: 맨 앞 숫자(쉼표 포함) 추출
-    m_total = re.match(r"[\s]*([\d,]+)", raw)
-    if m_total:
-        result["결제금액_총액"] = m_total.group(1).replace(",", "")
-    # 처방비용
-    m_rx = re.search(r"처방비용\s*:\s*([\d,]+)", raw)
-    if m_rx:
-        result["처방비용"] = m_rx.group(1).replace(",", "")
-    # 배송료
-    m_ship = re.search(r"배송료\s*:\s*([\d,]+)", raw)
-    if m_ship:
-        result["배송료"] = m_ship.group(1).replace(",", "")
-    # 포인트
-    m_pt = re.search(r"포인트\s*:\s*([\d,]+)", raw)
-    if m_pt:
-        result["포인트"] = m_pt.group(1).replace(",", "")
-    return result
-
-
 def _parse_shop_order_detail_h(html: str) -> dict:
     """order_view.asp (H형/사이트주문) 상세 파싱"""
     from bs4 import BeautifulSoup
@@ -4108,8 +4079,8 @@ def _parse_shop_order_detail_h(html: str) -> dict:
     else:
         data["주문상품"] = ""
 
-    # 결제금액 → 총액 / 처방비용 / 배송료 / 포인트 분리
-    data.update(_parse_payment_str(_text("결제금액")))
+    # 결제금액
+    data["결제금액"] = _text("결제금액")
 
     # 결제방법
     pay_method_cell = lv.get("결제방법")
@@ -4285,14 +4256,15 @@ def _parse_shop_order_detail_c(html: str) -> dict:
     else:
         data["주문상품"] = ""
 
-    # 결제금액 → 총액 / 처방비용 / 배송료 / 포인트 분리
+    # 결제금액
     price_cell = lv.get("금액확인")
     if price_cell:
         raw = clean_text(price_cell.get_text(" ", strip=True))
+        # "[입력]" 제거
         raw = raw.replace("[입력]", "").strip()
+        data["결제금액"] = raw
     else:
-        raw = ""
-    data.update(_parse_payment_str(raw))
+        data["결제금액"] = ""
 
     data["결제방법"] = _text("결제방법")
 
@@ -4395,8 +4367,7 @@ def _parse_shop_order_detail_c(html: str) -> dict:
 
 _SHOP_ORDER_EXCEL_COLS = [
     "주문번호", "경로", "주문일", "주문자", "한의원명", "연락처", "이메일",
-    "사업자번호", "상품명_목록", "주문상품",
-    "결제금액_총액", "처방비용", "배송료", "포인트", "결제방법",
+    "사업자번호", "상품명_목록", "주문상품", "결제금액", "결제방법",
     "입금", "입금자명", "계산서", "진행상태", "송장번호",
     "보내는분", "보내는분_연락처", "보내는분_주소",
     "받는분", "받는분_연락처", "받는분_주소",
@@ -4494,13 +4465,9 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         search_type   = settings.get("search_type", "name")
         search_str    = settings.get("search_str", "")
         max_pages     = settings.get("max_pages", 50)
-        save_excel    = settings.get("save_excel", True)
-        save_cj       = settings.get("save_cj", False)
-        cancel_event  = settings.get("cancel_event", None)
+        save_excel = settings.get("save_excel", True)
+        save_cj    = settings.get("save_cj", False)
         custom_output_dir = settings.get("output_dir", "").strip()
-
-        def _cancelled():
-            return cancel_event is not None and cancel_event.is_set()
 
         if custom_output_dir and os.path.isdir(custom_output_dir):
             base_dir = custom_output_dir
@@ -4513,10 +4480,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         output_root = os.path.join(base_dir, f"약속처방_{run_ts}")
 
         update_progress(5, "드라이버 시작 중...")
-        from selenium.webdriver.chrome.options import Options as _COptions
-        _opts = _COptions()
-        _opts.add_argument("--start-maximized")
-        driver = webdriver.Chrome(options=_opts)
+        driver = create_driver()
         login_driver(driver, ADMIN_ID, ADMIN_PW)
         update_progress(10, "로그인 완료")
 
@@ -4524,14 +4488,9 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         all_list_rows = []
         seen_order_nos = set()
         for status_code in status_codes:
-            if _cancelled():
-                break
             log(f"진행상태 코드={status_code or '전체'} 수집 시작")
             page = 1
             while page <= max_pages:
-                if _cancelled():
-                    log("취소 요청 → 목록 수집 중단")
-                    break
                 params = (f"s_date={start_date}&e_date={end_date}"
                           f"&order_ings={status_code}&search={search_type}"
                           f"&s_string={search_str}&page={page}")
@@ -4566,9 +4525,6 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         # --- 상세 조회 ---
         master_results = []
         for idx, row in enumerate(all_list_rows):
-            if _cancelled():
-                log("취소 요청 → 상세 조회 중단")
-                break
             pct = 10 + int(80 * idx / total)
             update_progress(pct, f"상세 조회 중 ({idx+1}/{total}): {row['주문번호']}")
 
@@ -6108,9 +6064,6 @@ def launch_gui():
     def sp_set_this_year():
         y = datetime.today().year
         _ph_set_date(sp_start_entry, f"{y}-01-01"); _ph_set_date(sp_end_entry, f"{y}-12-31")
-    def sp_set_last_year():
-        y = datetime.today().year - 1
-        _ph_set_date(sp_start_entry, f"{y}-01-01"); _ph_set_date(sp_end_entry, f"{y}-12-31")
     def sp_clear_dates():
         for e in (sp_start_entry, sp_end_entry):
             e.delete(0, tk.END); e.insert(0, _ph_map[e]); e.config(fg=_PH_COLOR)
@@ -6121,7 +6074,6 @@ def launch_gui():
     ttk.Button(sp_date_btn_frame, text="올해",   command=sp_set_this_year,  width=_bw2).grid(row=0, column=2, sticky="ew", padx=(0,2), pady=(0,3))
     ttk.Button(sp_date_btn_frame, text="어제",   command=sp_set_yesterday,  width=_bw2).grid(row=1, column=0, sticky="ew", padx=(0,2))
     ttk.Button(sp_date_btn_frame, text="저번달", command=sp_set_last_month, width=_bw2).grid(row=1, column=1, sticky="ew", padx=(0,2))
-    ttk.Button(sp_date_btn_frame, text="작년",   command=sp_set_last_year,  width=_bw2).grid(row=1, column=2, sticky="ew", padx=(0,2))
     ttk.Button(sp_date_btn_frame, text="초기화", command=sp_clear_dates,    width=_bw2).grid(row=0, column=3, rowspan=2, sticky="nsew")
 
     # ── 필터 ──
@@ -6163,32 +6115,17 @@ def launch_gui():
     ttk.Entry(sp_out_frame, textvariable=output_dir_var).grid(row=0, column=1, sticky="ew", padx=(0, 4))
     ttk.Button(sp_out_frame, text="찾아보기", command=_browse_output_dir, width=8).grid(row=0, column=2)
 
-    # ── 상태 + 진행바 ──
+    # ── 상태 + 진행바 + 실행 ──
     sp_status_label = ttk.Label(tab4, text="대기 중", foreground="gray")
     sp_status_label.grid(row=5, column=0, sticky="w", pady=(4, 2))
 
-    sp_progress_var = tk.IntVar(value=0)
-    sp_progress = ttk.Progressbar(tab4, orient="horizontal", mode="determinate",
-                                   maximum=100, variable=sp_progress_var)
+    sp_progress = ttk.Progressbar(tab4, orient="horizontal", mode="determinate", maximum=100)
     sp_progress.grid(row=6, column=0, sticky="ew", pady=(0, 6))
 
-    # ── 버튼 행 ──
     sp_btn_frame = ttk.Frame(tab4)
-    sp_btn_frame.grid(row=7, column=0, sticky="ew", pady=(4, 0))
-
-    sp_cancel_event = threading.Event()
-    sp_run_btn = ttk.Button(sp_btn_frame, text="실행")
-    sp_run_btn.pack(side="left", padx=(0, 4))
-    sp_cancel_btn = ttk.Button(sp_btn_frame, text="취소", state="disabled",
-                               command=lambda: sp_cancel_event.set())
-    sp_cancel_btn.pack(side="left", padx=(0, 4))
-
-    sp_open_folder_btn = ttk.Button(sp_btn_frame, text="출력 폴더 열기", state="disabled")
-    sp_open_folder_btn.pack(side="right", padx=(4, 0))
-    sp_last_result = {"text": ""}
-    sp_show_result_btn = ttk.Button(sp_btn_frame, text="결과 다시 보기", state="disabled",
-                                    command=lambda: messagebox.showinfo("마지막 결과", sp_last_result["text"]))
-    sp_show_result_btn.pack(side="right", padx=(4, 0))
+    sp_btn_frame.grid(row=7, column=0, sticky="w")
+    sp_run_btn = ttk.Button(sp_btn_frame, text="▶ 실행")
+    sp_run_btn.pack(side="left")
 
     # ── 로그 ──
     sp_log_text = tk.Text(tab4, height=12, width=70, state="disabled", font=("Malgun Gothic", 9))
@@ -6198,36 +6135,20 @@ def launch_gui():
     sp_log_text.configure(yscrollcommand=sp_log_scroll.set)
     tab4.rowconfigure(8, weight=1)
 
-    def _sp_log_wheel(event):
-        sp_log_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        return "break"
-    sp_log_text.bind("<MouseWheel>", _sp_log_wheel)
-
     def sp_log(msg: str):
-        def _do():
-            sp_log_text.configure(state="normal")
-            sp_log_text.insert(tk.END, msg + "\n")
-            sp_log_text.see(tk.END)
-            sp_log_text.configure(state="disabled")
-        root.after(0, _do)
+        sp_log_text.configure(state="normal")
+        sp_log_text.insert("end", msg + "\n")
+        sp_log_text.see("end")
+        sp_log_text.configure(state="disabled")
 
     def sp_update_progress(pct: int, msg: str):
-        sp_progress_var.set(pct)
-        if pct == 100:
-            fg, bar_style = "#2E7D32", "Done.Horizontal.TProgressbar"
-        elif pct == 0:
-            fg, bar_style = "#B71C1C", "Error.Horizontal.TProgressbar"
-        else:
-            fg, bar_style = "#E65100", None
-        sp_status_label.config(text=msg, foreground=fg)
-        if bar_style:
-            sp_progress.config(style=bar_style)
+        sp_progress["value"] = pct
+        sp_status_label.config(text=msg)
+        root.update_idletasks()
 
     def on_sp_run():
-        if _global_running.is_set():
+        if _running_lock.get("running"):
             messagebox.showwarning("실행 중", "다른 탭이 현재 실행 중입니다.\n완료 후 다시 시도해주세요.")
-            return
-        if not ensure_admin_credentials(root):
             return
 
         # 날짜 값 읽기 (placeholder면 빈 문자열)
@@ -6257,7 +6178,6 @@ def launch_gui():
             "save_cj": sp_save_cj_var.get(),
             "output_dir": output_dir_var.get().strip(),
             "max_pages": 100,
-            "cancel_event": sp_cancel_event,
         }
 
         sp_log_text.configure(state="normal")
@@ -6265,40 +6185,25 @@ def launch_gui():
         sp_log_text.configure(state="disabled")
         sp_progress["value"] = 0
 
-        _global_running.set()
-        sp_cancel_event.clear()
+        _running_lock["running"] = True
         sp_run_btn.config(state="disabled")
-        sp_cancel_btn.config(state="normal")
 
         def run_thread():
             try:
                 result = run_shop_order_job(
                     sp_settings,
-                    progress_callback=lambda p, m: root.after(0, lambda _p=p, _m=m: sp_update_progress(_p, _m)),
-                    log_callback=lambda m: root.after(0, lambda _m=m: sp_log(_m)),
+                    progress_callback=lambda p, m: root.after(0, lambda: sp_update_progress(p, m)),
+                    log_callback=lambda m: root.after(0, lambda: sp_log(m)),
                 )
-                if sp_cancel_event.is_set():
-                    root.after(0, lambda: sp_update_progress(0, "취소됨"))
-                    root.after(0, lambda: messagebox.showinfo("취소", "작업이 취소됐어요."))
-                elif result:
-                    sp_last_result["text"] = f"저장 위치:\n{result}"
-                    root.after(0, lambda: sp_update_progress(100, "완료"))
-                    root.after(0, lambda: sp_show_result_btn.config(state="normal"))
-                    if os.path.isdir(result):
-                        root.after(0, lambda d=result: sp_open_folder_btn.config(
-                            state="normal",
-                            command=lambda: os.startfile(d)
-                        ))
-                    root.after(0, lambda r=result: messagebox.showinfo("완료", f"저장 완료!\n{r}"))
+                if result:
+                    root.after(0, lambda: messagebox.showinfo("완료", f"저장 완료!\n{result}"))
             except Exception as e:
-                err = str(e)
-                root.after(0, lambda: sp_update_progress(0, "오류 발생"))
-                root.after(0, lambda: messagebox.showerror("오류", err))
+                root.after(0, lambda: messagebox.showerror("오류", str(e)))
             finally:
-                _global_running.clear()
+                _running_lock["running"] = False
                 root.after(0, lambda: sp_run_btn.config(state="normal"))
-                root.after(0, lambda: sp_cancel_btn.config(state="disabled"))
 
+        import threading
         threading.Thread(target=run_thread, daemon=True).start()
 
     sp_run_btn.config(command=on_sp_run)
