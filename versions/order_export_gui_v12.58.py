@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "12.65"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "12.58"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -76,7 +76,6 @@ HOSPITAL_PRESETS = [
     "고래한방_관저점",
     "고래한방_판암점",
     "고래한방_세종점",
-    "고래한방_오창점",
     "청주필한방병원",
     "필한방병원",
     "약손한의원",
@@ -93,7 +92,6 @@ HOSPITAL_SEARCH_MAP = {
     "고래한방_관저점": ["고래", "관저"],
     "고래한방_판암점": ["고래", "판암"],
     "고래한방_세종점": ["고래", "세종"],
-    "고래한방_오창점": ["고래", "오창"],
     "청주필한방병원": ["청주필"],
     "필한방병원": ["필한방병원"],
     "약손한의원": ["약손"],
@@ -103,33 +101,6 @@ HOSPITAL_SEARCH_MAP = {
     "개금365한의원": ["개금"],
     "태화당한의원": ["태화당"],
 }
-
-
-# ---------- 앱 설정 저장/불러오기 ----------
-def _get_config_path() -> str:
-    if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, "app_config.json")
-
-
-def load_app_config() -> dict:
-    try:
-        with open(_get_config_path(), "r", encoding="utf-8") as f:
-            import json
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def save_app_config(config: dict):
-    try:
-        import json
-        with open(_get_config_path(), "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
 
 
 # ---------- 자동 업데이트 함수 ----------
@@ -642,7 +613,6 @@ GORAE_MEMBER_BRANCH_MAP: dict = {
     "정재희": "관저",
     "최혁준": "판암",
     "박중현": "세종",
-    "이형배": "오창",
 }
 
 
@@ -652,7 +622,7 @@ def extract_branch_keyword(hospital_name: str, address: str, member_name: str = 
     address = clean_text(address)
     member_name = clean_text(member_name)
     special_branch_rules = {
-        "고래한방병원": ["판암", "세종", "관저", "오창"],
+        "고래한방병원": ["판암", "세종", "관저"],
     }
     if hospital_name in special_branch_rules:
         # 1차: 주소에서 키워드 검색
@@ -1588,8 +1558,6 @@ def get_gorae_branch(text: str) -> str:
         return '고래한방_판암'
     elif '세종' in text or '박중현' in text:
         return '고래한방_세종'
-    elif '오창' in text or '이형배' in text:
-        return '고래한방_오창'
     return '고래한방_관저'  # fallback
 
 
@@ -1764,7 +1732,6 @@ GORAE_BRANCH_SENDER = {
     "관저": {"name": "고래한방병원 관저점", "phone": "042-542-1075", "address": "대전 서구 계백로 993"},
     "판암": {"name": "고래한방병원 판암점", "phone": "042-331-1005", "address": "대전 동구 옥전로 153"},
     "세종": {"name": "고래한방병원 세종점", "phone": "044-417-6637", "address": "세종특별자치시 보듬3로 158"},
-    "오창": {"name": "고래한방병원 오창점", "phone": "043-714-3075", "address": "충북 청주시 청원구 오창읍 과학산업3로 216 508호"},
 }
 
 # 순서 중요: 긴/구체적 키워드를 앞에 (예: "청주필"이 "필한방"보다 먼저)
@@ -1874,19 +1841,18 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return f"{name_with_honorific}_복용법" if name_with_honorific else "복용법"
         return name_with_honorific
 
-    def make_row(base_row, ordercode_str: str, 품명_str: str, 받는분_override: str = "") -> list:
+    def make_row(base_row, ordercode_str: str, 품명_str: str) -> list:
         """실제 양식 기준 17컬럼 행 (list 반환 — 빈 헤더 컬럼 처리)"""
         receiver_phone = clean_text(base_row.get("받는분_휴대폰", "") or base_row.get("받는분_전화", ""))
         original_sender_phone = clean_text(base_row.get("보내는분_전화", "") or base_row.get("보내는분_휴대폰", ""))
         sender_phone = _lookup_cj_sender_phone(base_row) or original_sender_phone
         if not _is_valid_phone(sender_phone):
             sender_phone = original_sender_phone if _is_valid_phone(original_sender_phone) else ""
-        receiver_name = 받는분_override if 받는분_override else clean_text(base_row.get("받는분", ""))
         return [
             format_order_date_only(base_row.get("주문날짜", "")), # A 주문날짜
             ordercode_str,                                       # B 고객주문번호
             clean_text(base_row.get("한의원명", "")),             # C 상호
-            receiver_name,                                       # D 받는분성명
+            clean_text(base_row.get("받는분", "")),              # D 받는분성명
             receiver_phone,                                      # E 받는분전화번호
             clean_text(base_row.get("받는분_주소", "")),          # F 받는분주소
             f"한약({품명_str})",                                   # G 품목명
@@ -2021,11 +1987,8 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         ph = norm_phone(row.get("받는분_휴대폰", "") or row.get("받는분_전화", ""))
         ph_key = f"ph:{ph}" if ph else ""
         if ph_key and ph_key in bundle_key_set:
-            # 전화 키 매칭: 주소도 [묶음] 태그 주문들과 같아야 포함 (다른 주소는 개별 처리)
-            row_addr = norm_addr(row.get("받는분_주소", ""))
-            tagged_addrs = bundle_phone_addrs.get(ph, set())
-            if row_addr in tagged_addrs:
-                bundle_groups.setdefault(ph_key, []).append(row)
+            # 전화 키 매칭: 태그 없어도 포함
+            bundle_groups.setdefault(ph_key, []).append(row)
         elif _has_bundle_tag(row):
             # 주소 키 매칭: [묶음] 태그 있는 주문만
             addr = norm_addr(row.get("받는분_주소", ""))
@@ -2037,71 +2000,6 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         codes = [clean_text(r.get("주문코드", "")) for r in grp]
         names = [clean_text(r.get("환자명", "") or "") for r in grp]
         print(f"  키={bkey[:30]}: 주문={codes}, 환자={names}")
-
-    # -----------------------------------------------------------
-    # 주소 자동묶음 사전 처리 (태그 없어도 같은 주소면 2명까지 묶음)
-    # 30포 이상 주문은 제외, 이미 bundle_groups에 있는 주문도 제외
-    # -----------------------------------------------------------
-    # id(row) → addr_bundle_key 매핑
-    addr_bundle_map: dict = {}        # id(row) → str key
-    addr_bundle_groups: dict = {}     # key → list[row]
-
-    def is_addr_bundle_eligible(row) -> bool:
-        """주소 자동묶음 대상 여부"""
-        if should_skip_for_cj(row):
-            return False
-        if clean_text(row.get("배송구분", "")) == "방문수령":
-            return False
-        # 이미 [묶음] 태그 기반 bundle_groups에 포함된 주문은 제외
-        ph = norm_phone(row.get("받는분_휴대폰", "") or row.get("받는분_전화", ""))
-        ph_key = f"ph:{ph}" if ph else ""
-        if ph_key and ph_key in bundle_key_set:
-            return False
-        if _has_bundle_tag(row):
-            addr = norm_addr(row.get("받는분_주소", ""))
-            addr_key = f"addr:{addr}" if addr else ""
-            if addr_key and addr_key in bundle_key_set:
-                return False
-        # 팩수 30 이상이면 단독 처리
-        packs = 0
-        for field in ["처방명_목록추가표시", "처방명"]:
-            val = clean_text(row.get(field, "") or "")
-            m = re.search(r"(\d+)\s*포", val)
-            if m:
-                packs = int(m.group(1))
-                break
-        if packs >= 30:
-            return False
-        addr = norm_addr(row.get("받는분_주소", ""))
-        return bool(addr)
-
-    print("\n[CJ묶음] 주소자동묶음 사전 처리")
-    eligible_rows = [r for r in master_results if is_addr_bundle_eligible(r)]
-    # 주소 → list[row] 수집
-    _addr_collect: dict = {}
-    for r in eligible_rows:
-        a = norm_addr(r.get("받는분_주소", ""))
-        _addr_collect.setdefault(a, []).append(r)
-
-    # 최대 2명씩 묶기 (N=2→[2], N=3→[2,1], N=4→[2,2], N=5→[2,2,1])
-    _ab_counter = 0
-    for addr, grp in _addr_collect.items():
-        if len(grp) < 2:
-            continue
-        idx = 0
-        while idx < len(grp):
-            chunk = grp[idx: idx + 2]
-            idx += 2
-            if len(chunk) < 2:
-                continue  # 홀로 남은 건 자동묶음 안 함
-            _ab_counter += 1
-            akey = f"autoaddr:{_ab_counter}"
-            for r in chunk:
-                addr_bundle_map[id(r)] = akey
-            addr_bundle_groups[akey] = chunk
-            codes = [clean_text(r.get("주문코드", "")) for r in chunk]
-            names = [clean_text(r.get("환자명", "") or "") for r in chunk]
-            print(f"  [주소자동묶음] 키={akey}, 주소={addr[:20]}, 주문={codes}, 환자={names}")
 
     # -----------------------------------------------------------
     # 헬퍼: 주문에 해당하는 bundle key 반환
@@ -2121,7 +2019,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
     # -----------------------------------------------------------
     # 3단계: 원래 순서 유지하며 행 생성
     # -----------------------------------------------------------
-    rows = []         # list of (list_data, highlight_bool)
+    rows = []
     bundle_keys_done: set = set()
     print("\n[CJ묶음] 3단계: 행 생성")
 
@@ -2129,29 +2027,6 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         if clean_text(row.get("배송구분", "")) == "방문수령":
             continue
         if should_skip_for_cj(row):
-            continue
-
-        # 주소 자동묶음 우선 확인
-        akey = addr_bundle_map.get(id(row), "")
-        if akey:
-            if akey in bundle_keys_done:
-                continue
-            bundle_keys_done.add(akey)
-            group = addr_bundle_groups[akey]
-            ordercode_str = "/".join(clean_text(r.get("주문코드", "")) for r in group)
-            # 받는분 성명: "홍길동 / 박보검"
-            names_override = " / ".join(clean_text(r.get("받는분", "")) for r in group)
-            # 품목명: 각 환자명_복용법 조합을 ", " 로 연결
-            명_str = ", ".join(
-                품명_part(
-                    clean_text(r.get("주문코드", "")),
-                    clean_text(r.get("환자명", "") or ""),
-                    force_dosage=is_yakson(r),
-                )
-                for r in group
-            )
-            print(f"  [주소자동묶음] 주문코드={ordercode_str}, 환자={명_str}")
-            rows.append((make_row(group[0], ordercode_str, 명_str, 받는분_override=names_override), True))
             continue
 
         bkey = get_bundle_key(row)
@@ -2162,33 +2037,25 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                 continue  # 이미 묶음 행 생성됨
             bundle_keys_done.add(bkey)
             group = bundle_groups.get(bkey, [row])
-            kind = "전화묶음" if bkey.startswith("ph:") else "주소묶음"
-            # 최대 2명씩 분할 (N=3→2+1, N=4→2+2)
-            for ci in range(0, len(group), 2):
-                chunk = group[ci: ci + 2]
-                ordercode_str = "/".join(clean_text(r.get("주문코드", "")) for r in chunk)
-                names_override = " / ".join(clean_text(r.get("받는분", "")) for r in chunk)
-                명_str = "/".join(
-                    품명_part(
-                        clean_text(r.get("주문코드", "")),
-                        clean_text(r.get("환자명", "") or ""),
-                        force_dosage=is_yakson(r),
-                    )
-                    for r in chunk
+            ordercode_str = "/".join(clean_text(r.get("주문코드", "")) for r in group)
+            명_str = "/".join(
+                품명_part(
+                    clean_text(r.get("주문코드", "")),
+                    clean_text(r.get("환자명", "") or ""),
+                    force_dosage=is_yakson(r),
                 )
-                print(f"  [{kind}] 주문코드={ordercode_str}, 환자={명_str}")
-                rows.append((make_row(chunk[0], ordercode_str, 명_str, 받는분_override=names_override), True))
+                for r in group
+            )
+            kind = "전화묶음" if bkey.startswith("ph:") else "주소묶음"
+            print(f"  [{kind}] 주문코드={ordercode_str}, 환자={명_str}")
+            rows.append(make_row(group[0], ordercode_str, 명_str))
         else:
             ordercode = clean_text(row.get("주문코드", ""))
             patient_name = clean_text(row.get("환자명", "") or "")
             print(f"  [단독] {ordercode} / {patient_name}")
-            rows.append((make_row(row, ordercode, 품명_part(ordercode, patient_name, force_dosage=yakson)), False))
+            rows.append(make_row(row, ordercode, 품명_part(ordercode, patient_name, force_dosage=yakson)))
 
-    data = [r for r, _ in rows]
-    highlights = [h for _, h in rows]
-    df = pd.DataFrame(data, columns=_CJ_COLUMNS)
-    df["_highlight"] = highlights
-    return df
+    return pd.DataFrame(rows, columns=_CJ_COLUMNS)
 
 
 # ---------- 탕전주문 조회 실행 ----------
@@ -2206,7 +2073,6 @@ def run_job(settings: dict, progress_callback=None):
         target_statuses = settings["target_statuses"]
         max_page_limit = settings["max_page_limit"]
         hospital_filter = clean_text(settings.get("hospital_filter", "") or "")
-        payment_filter = clean_text(settings.get("payment_filter", "") or "")
         search_target = settings.get("search_target", "주문자명")
         search_filter = clean_text(settings.get("search_filter", "") or "")
         # 프리셋 표시명이면 키워드 리스트로 변환, 직접입력이면 단일 키워드
@@ -2383,21 +2249,11 @@ def run_job(settings: dict, progress_callback=None):
                         _sender = clean_text(master_data.get("보내는분", "") or "")
                         _sender_addr = clean_text(master_data.get("보내는분_주소", "") or "")
                         _receiver_addr = clean_text(master_data.get("받는분_주소", "") or "")
-                        # 회원명은 master_data에서 직접 읽어야 함 (이전 루프 값 사용 방지)
-                        _cur_member = clean_text(master_data.get("회원명", "") or "")
-                        _member_branch = GORAE_MEMBER_BRANCH_MAP.get(_cur_member, "")
-                        # 목록 행 전체 텍스트도 포함 (한의원명이 상세페이지에 없을 때 보완)
-                        _row_text = clean_text(item.get("row_text", "") or "")
-                        _haystack = f"{_hn} {_sender} {_sender_addr} {_receiver_addr} {_member_branch} {_row_text}"
+                        # 회원명 → 지점 키워드 변환 (환자 직접발송 건 지점 감지용)
+                        _member_branch = GORAE_MEMBER_BRANCH_MAP.get(member_name, "")
+                        _haystack = f"{_hn} {_sender} {_sender_addr} {_receiver_addr} {_member_branch}"
                         if not all(kw in _haystack for kw in hospital_keywords):
-                            print(f"    -> 제외: 한의원 필터 '{hospital_filter}' 미일치 ({_hn or _sender})")
-                            continue
-
-                    # 결제방법 필터
-                    if payment_filter:
-                        _pay = clean_text(master_data.get("결제방법", "") or "")
-                        if payment_filter not in _pay:
-                            print(f"    -> 제외: 결제방법 필터 '{payment_filter}' 미일치 ({_pay})")
+                            print(f"    -> 제외: 한의원 필터 '{hospital_filter}' 미일치 ({_hn})")
                             continue
 
                     ordercode = clean_text(master_data.get("주문코드", ""))
@@ -2705,25 +2561,7 @@ def run_job(settings: dict, progress_callback=None):
             cj_df = build_cj_upload_df(master_results, pdf_jobs)
             cj_filename = f"{run_timestamp}_대한통운_파일업로드_양식.xlsx"
             cj_path = os.path.join(output_root, cj_filename)
-            highlight_flags = cj_df["_highlight"].tolist() if "_highlight" in cj_df.columns else []
-            cj_df_save = cj_df.drop(columns=["_highlight"], errors="ignore")
-            cj_df_save.to_excel(cj_path, index=False)
-            # 노란색 배경 적용 (묶음 행)
-            if any(highlight_flags):
-                try:
-                    from openpyxl import load_workbook
-                    from openpyxl.styles import PatternFill
-                    _yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-                    _wb = load_workbook(cj_path)
-                    _ws = _wb.active
-                    for _i, _flag in enumerate(highlight_flags):
-                        if _flag:
-                            _excel_row = _i + 2  # header=row1, data starts row2
-                            for _col in range(1, len(cj_df_save.columns) + 1):
-                                _ws.cell(row=_excel_row, column=_col).fill = _yellow
-                    _wb.save(cj_path)
-                except Exception as _e:
-                    print(f"[경고] 노란색 하이라이트 적용 실패: {_e}")
+            cj_df.to_excel(cj_path, index=False)
             print(f"대한통운 파일 업로드 양식 저장: {cj_path}")
 
         if settings.get("save_bulk_excel") and master_results:
@@ -2740,9 +2578,7 @@ def run_job(settings: dict, progress_callback=None):
                          if r.get("_bulk") and "관저" in (r.get("_hospital_folder") or "")]
             bulk_세종 = [r for r in master_results
                          if r.get("_bulk") and "세종" in (r.get("_hospital_folder") or "")]
-            bulk_오창 = [r for r in master_results
-                         if r.get("_bulk") and "오창" in (r.get("_hospital_folder") or "")]
-            if bulk_판암 or bulk_관저 or bulk_세종 or bulk_오창:
+            if bulk_판암 or bulk_관저 or bulk_세종:
                 def _bulk_to_df(rows):
                     df = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in rows])
                     return df[[c for c in _BULK_COLS if c in df.columns]]
@@ -2755,11 +2591,9 @@ def run_job(settings: dict, progress_callback=None):
                         _bulk_to_df(bulk_관저).to_excel(writer, sheet_name="관저", index=False)
                     if bulk_세종:
                         _bulk_to_df(bulk_세종).to_excel(writer, sheet_name="세종", index=False)
-                    if bulk_오창:
-                        _bulk_to_df(bulk_오창).to_excel(writer, sheet_name="오창", index=False)
-                print(f"벌크 내역 저장: {bulk_path} (판암 {len(bulk_판암)}건, 관저 {len(bulk_관저)}건, 세종 {len(bulk_세종)}건, 오창 {len(bulk_오창)}건)")
+                print(f"벌크 내역 저장: {bulk_path} (판암 {len(bulk_판암)}건, 관저 {len(bulk_관저)}건, 세종 {len(bulk_세종)}건)")
             else:
-                print("벌크 내역 없음 (판암·관저·세종·오창)")
+                print("벌크 내역 없음 (판암·관저·세종)")
 
         if settings["save_decoction_pdf"] or settings["save_dispense_pdf"] or settings["save_dosage_text_pdf"]:
             ensure_dir(output_root)
@@ -4156,20 +3990,9 @@ def launch_gui():
     ttk.Button(filter_lf, text="지우기",
                command=lambda: search_filter_var.set("")).grid(row=1, column=2, padx=(4, 0), pady=(6, 0))
 
-    ttk.Label(filter_lf, text="결제방법").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
-    payment_filter_var = tk.StringVar(value="")
-    payment_combo = ttk.Combobox(
-        filter_lf, textvariable=payment_filter_var,
-        values=["", "카드", "무통장", "실시간계좌이체", "가상계좌", "네이버페이", "카카오페이"],
-        state="normal", width=20
-    )
-    payment_combo.grid(row=2, column=1, sticky="w", pady=(6, 0))
-    ttk.Button(filter_lf, text="지우기",
-               command=lambda: payment_filter_var.set("")).grid(row=2, column=2, padx=(4, 0), pady=(6, 0))
-
     ttk.Label(filter_lf, text="목록 선택 or 직접 입력 · 검색어는 콤마로 여러 개 입력 가능 · 비우면 전체",
               foreground="gray", font=("Malgun Gothic", 8)).grid(
-        row=3, column=0, columnspan=3, sticky="w", pady=(3, 0)
+        row=2, column=0, columnspan=3, sticky="w", pady=(3, 0)
     )
 
     save_excel_var = tk.BooleanVar(value=True)
@@ -4355,8 +4178,7 @@ def launch_gui():
     ttk.Button(test_row_frame, text="테스트 옵션", command=open_test_options).pack(side="right")
 
     # ---------- 저장 위치 선택 ----------
-    _cfg = load_app_config()
-    output_dir_var = tk.StringVar(value=_cfg.get("output_dir", ""))
+    output_dir_var = tk.StringVar(value="")
     output_dir_frame = ttk.Frame(tab1)
     output_dir_frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
     output_dir_frame.columnconfigure(1, weight=1)
@@ -4367,7 +4189,6 @@ def launch_gui():
         d = filedialog.askdirectory(title="결과 폴더를 저장할 위치 선택")
         if d:
             output_dir_var.set(d)
-            save_app_config({**load_app_config(), "output_dir": d})
 
     ttk.Button(output_dir_frame, text="찾아보기", command=_browse_output_dir, width=8).grid(row=0, column=2, sticky="e")
 
@@ -4511,7 +4332,6 @@ def launch_gui():
             "auto_cancel_status": auto_cancel_status_var.get(),
             "save_decoction_sheet": save_decoction_sheet_var.get(),
             "hospital_filter": hospital_filter_var.get().strip(),
-            "payment_filter": payment_filter_var.get().strip(),
             "search_target": search_target_var.get(),
             "search_filter": search_filter_var.get().strip(),
             "cancel_event": cancel_event,

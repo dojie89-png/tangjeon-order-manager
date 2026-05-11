@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "12.65"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "12.63"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -2083,15 +2083,21 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         a = norm_addr(r.get("받는분_주소", ""))
         _addr_collect.setdefault(a, []).append(r)
 
-    # 최대 2명씩 묶기 (N=2→[2], N=3→[2,1], N=4→[2,2], N=5→[2,2,1])
+    # 2명 초과 시 쌍으로 묶기 (N=2→pair, N=3→trio, N=4→2+2, N=5→2+2+1)
     _ab_counter = 0
     for addr, grp in _addr_collect.items():
         if len(grp) < 2:
             continue
+        # 그룹을 쌍으로 분배
         idx = 0
         while idx < len(grp):
-            chunk = grp[idx: idx + 2]
-            idx += 2
+            remaining = len(grp) - idx
+            if remaining >= 3:
+                take = 3 if remaining == 3 else 2
+            else:
+                take = remaining
+            chunk = grp[idx: idx + take]
+            idx += take
             if len(chunk) < 2:
                 continue  # 홀로 남은 건 자동묶음 안 함
             _ab_counter += 1
@@ -2162,22 +2168,19 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                 continue  # 이미 묶음 행 생성됨
             bundle_keys_done.add(bkey)
             group = bundle_groups.get(bkey, [row])
-            kind = "전화묶음" if bkey.startswith("ph:") else "주소묶음"
-            # 최대 2명씩 분할 (N=3→2+1, N=4→2+2)
-            for ci in range(0, len(group), 2):
-                chunk = group[ci: ci + 2]
-                ordercode_str = "/".join(clean_text(r.get("주문코드", "")) for r in chunk)
-                names_override = " / ".join(clean_text(r.get("받는분", "")) for r in chunk)
-                명_str = "/".join(
-                    품명_part(
-                        clean_text(r.get("주문코드", "")),
-                        clean_text(r.get("환자명", "") or ""),
-                        force_dosage=is_yakson(r),
-                    )
-                    for r in chunk
+            ordercode_str = "/".join(clean_text(r.get("주문코드", "")) for r in group)
+            명_str = "/".join(
+                품명_part(
+                    clean_text(r.get("주문코드", "")),
+                    clean_text(r.get("환자명", "") or ""),
+                    force_dosage=is_yakson(r),
                 )
-                print(f"  [{kind}] 주문코드={ordercode_str}, 환자={명_str}")
-                rows.append((make_row(chunk[0], ordercode_str, 명_str, 받는분_override=names_override), True))
+                for r in group
+            )
+            kind = "전화묶음" if bkey.startswith("ph:") else "주소묶음"
+            print(f"  [{kind}] 주문코드={ordercode_str}, 환자={명_str}")
+            # [묶음] 태그 기반 묶음도 노란색 하이라이트
+            rows.append((make_row(group[0], ordercode_str, 명_str), True))
         else:
             ordercode = clean_text(row.get("주문코드", ""))
             patient_name = clean_text(row.get("환자명", "") or "")
