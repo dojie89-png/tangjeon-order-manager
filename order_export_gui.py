@@ -5003,7 +5003,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
 def launch_gui():
     root = tk.Tk()
     root.title(f"케이진 탕전주문 관리 v{APP_VERSION}")
-    root.geometry("540x820")
+    root.geometry("540x840")
     root.resizable(False, True)   # 세로 리사이즈 허용 (맥에서 하단 잘림 대응)
 
     # 진행바 완료/오류 색상 (네이티브 테마 유지, Windows vista 테마에서 background 적용됨)
@@ -6578,7 +6578,7 @@ def launch_gui():
     def _open_goods_dialog():
         dlg = tk.Toplevel(root)
         dlg.title("상품 내역 관리")
-        dlg.geometry("520x400")
+        dlg.geometry("640x520")
         dlg.resizable(False, True)
         dlg.transient(root)
         dlg.grab_set()
