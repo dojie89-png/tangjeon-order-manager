@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.36"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.37"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -4736,15 +4736,34 @@ def _parse_qty_int(qty_str: str) -> int:
 
 
 def _extract_product_names_for_tax(merged: dict) -> list:
-    """주문 행에서 상품명 리스트 추출 (면세/과세 매핑용).
+    """주문 행에서 상품명 리스트 추출 (면세/과세 캐시 매핑용).
 
-    주문상품 형식: "경옥고 30환: 1개 / 공진단- 2개"
+    H형 (사이트 직접주문) 형식: "경옥고 30환: 1개 / 공진단- 2개"
       → ["경옥고 30환", "공진단"]
+
+    C형 (카페 주문) 형식: "프리바이오틱스: 유산균 / 인삼: , 백절삼600g"
+      여기서 앞 부분(콜론 앞)은 카테고리, 뒷 부분(콜론 뒤)이 실제 상품명.
+      → ["유산균", "백절삼600g"]
+
     상품명_목록: 목록 페이지의 단일 상품명 (폴백용)
     """
     주문상품 = clean_text(merged.get("주문상품", "") or "")
     if 주문상품:
-        names = [name for name, _ in _parse_order_products(주문상품) if name]
+        names = []
+        for raw_name, _ in _parse_order_products(주문상품):
+            if not raw_name:
+                continue
+            # C형 카페 주문: "카테고리: 상품명텍스트" 형식 감지
+            # — _parse_order_products 에서 숫자 패턴이 매칭 안 되면 콜론이 name에 그대로 남음
+            # — 콜론 뒤가 비숫자 텍스트이면 뒷 부분이 실제 상품명
+            if ":" in raw_name:
+                _k, _, _v = raw_name.partition(":")
+                _v = _v.strip().lstrip(",").strip()
+                # 뒤가 "N개" 형태의 수량이 아닌 텍스트일 때만 C형으로 처리
+                if _v and not re.match(r"^\d+개?$", _v):
+                    names.append(_v)
+                    continue
+            names.append(raw_name)
         if names:
             return names
     상품명_목록 = clean_text(merged.get("상품명_목록", "") or "")
