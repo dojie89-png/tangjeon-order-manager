@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.37"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.38"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -5380,6 +5380,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
 
         # --- 상세 조회 ---
         master_results = []
+        _fuzzy_lookup_cache: dict = {}  # 상품명 퍼지 매칭 결과 메모이제이션 {name: cache_key or None}
         for idx, row in enumerate(all_list_rows):
             if _cancelled():
                 log("취소 요청 → 상세 조회 중단")
@@ -5435,8 +5436,35 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
                         None,
                     )
                 if _hit is None:
-                    log(f"  ⚠ 캐시 미매칭: '{_n}'")
-                    _hit = {}
+                    # ── 퍼지 매칭 시도: 공백 제거 후 부분 문자열 / SequenceMatcher ──
+                    if _n in _fuzzy_lookup_cache:
+                        _fkey = _fuzzy_lookup_cache[_n]
+                        _hit = product_tax_map[_fkey] if _fkey else {}
+                        if not _fkey:
+                            log(f"  ⚠ 캐시 미매칭: '{_n}'")
+                    else:
+                        import difflib as _dl2
+                        _n_c = re.sub(r"\s+", "", _n).lower()
+                        _bk, _bs = None, 0.0
+                        for _k in product_tax_map:
+                            _k_c = re.sub(r"\s+", "", _k).lower()
+                            if len(_n_c) >= 2 and len(_k_c) >= 2:
+                                if _n_c in _k_c or _k_c in _n_c:
+                                    _sc = 0.9
+                                else:
+                                    _sc = _dl2.SequenceMatcher(None, _n_c, _k_c).ratio()
+                            else:
+                                _sc = 0.0
+                            if _sc > _bs:
+                                _bs, _bk = _sc, _k
+                        if _bk and _bs >= 0.55:
+                            log(f"  퍼지 매칭: '{_n}' → '{_bk}' (score={_bs:.2f})")
+                            _hit = product_tax_map[_bk]
+                            _fuzzy_lookup_cache[_n] = _bk
+                        else:
+                            log(f"  ⚠ 캐시 미매칭: '{_n}'")
+                            _hit = {}
+                            _fuzzy_lookup_cache[_n] = None
                 _tax_list.append(_hit)
             merged["_tax_list"] = _tax_list
 
