@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.34"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.35"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -4843,24 +4843,73 @@ def _fetch_shop_product_tax_map(driver, log=None) -> dict:
     return product_tax
 
 
-def _fetch_cafe_product_tax_map(driver, log=None) -> dict:
+def _fetch_cafe_product_tax_map(driver, shop_map: dict = None, log=None) -> dict:
     """카페 상품관리 목록에서 상품별 처방비용 수집.
 
-    cafe_goods 디렉터리는 목록(goods_list.asp) → 수정 폼(goods_write.asp?seqno=N)
-    구조라서, 가격이 <input value="N"> 속성에 들어있음.
+    카페 페이지는 단일 <input name="price" value="N"> 필드만 있고
+    공급가액/부가세/면세금액 세목이 없음.
+    → shop_map(약속처방 캐시)에 퍼지 매칭하여 과세구분을 상속받고,
+      price로 공급가액/부가세/면세금액을 역산해 저장.
     """
     import re as _re
     import time as _time
+    import difflib as _dl
     from bs4 import BeautifulSoup as _BS
 
     if log is None:
         log = print
+    if shop_map is None:
+        shop_map = {}
+
+    # ── 퍼지 매칭: 카페 상품명 → 약속처방 캐시 키 ──
+    def _fuzzy_match(cafe_name: str):
+        """카페 상품명을 shop_map 키에 퍼지 매칭. (matched_key, ref_entry) 반환."""
+        if not shop_map:
+            return None, None
+        cafe_norm = _re.sub(r"\s+", "", cafe_name).lower()
+        best_key = None
+        best_score = 0.0
+        for shop_key in shop_map:
+            shop_norm = _re.sub(r"\s+", "", shop_key).lower()
+            # 한쪽이 다른 쪽의 부분 문자열이면 강한 매칭
+            if (len(cafe_norm) >= 3 and len(shop_norm) >= 3
+                    and (cafe_norm in shop_norm or shop_norm in cafe_norm)):
+                score = 0.9
+            else:
+                score = _dl.SequenceMatcher(None, cafe_norm, shop_norm).ratio()
+            if score > best_score:
+                best_score = score
+                best_key = shop_key
+        if best_key and best_score >= 0.55:
+            return best_key, shop_map[best_key]
+        return None, None
+
+    # ── price + 과세구분 → 공급가액/부가세/면세금액 역산 ──
+    def _compute_breakdown(price: int, 과세구분: str, ref: dict = None) -> dict:
+        if 과세구분 == "면세":
+            return {"공급가액": 0, "부가세": 0, "면세금액": price, "과세구분": "면세"}
+        if 과세구분 == "과세":
+            공급가액 = round(price / 1.1)
+            부가세 = price - 공급가액
+            return {"공급가액": 공급가액, "부가세": 부가세, "면세금액": 0, "과세구분": "과세"}
+        if 과세구분 == "혼합" and ref:
+            ref_taxable = ref.get("공급가액", 0)
+            ref_exempt  = ref.get("면세금액", 0)
+            ref_total   = ref_taxable + ref_exempt
+            if ref_total > 0:
+                면세금액 = round(price * ref_exempt / ref_total)
+                과세부분 = price - 면세금액
+                공급가액 = round(과세부분 / 1.1)
+                부가세 = 과세부분 - 공급가액
+                return {"공급가액": 공급가액, "부가세": 부가세, "면세금액": 면세금액, "과세구분": "혼합"}
+        # 매칭 실패 or 알 수 없음
+        return {"공급가액": 0, "부가세": 0, "면세금액": 0, "과세구분": "?"}
 
     product_tax: dict = {}
 
     try:
         # ── 목록 페이지 순회: seqno 수집 ──
-        products: list = []   # [(seqno, name), ...]
+        seqnos: list = []
         seen_seqs: set = set()
         page = 1
         while True:
@@ -4873,7 +4922,6 @@ def _fetch_cafe_product_tax_map(driver, log=None) -> dict:
             found_on_page = 0
             for a in soup.find_all("a", href=True):
                 href = a["href"]
-                # 카페는 목록에서 바로 goods_write.asp?seqno=N 로 연결
                 m = _re.search(r"goods_write\.asp\?(?:.*?&)?seqno=(\d+)", href)
                 if not m:
                     continue
@@ -4882,13 +4930,7 @@ def _fetch_cafe_product_tax_map(driver, log=None) -> dict:
                     continue
                 seen_seqs.add(seqno)
                 found_on_page += 1
-                name = clean_text(a.get_text())
-                if not name:
-                    td = a.find_parent("td")
-                    if td:
-                        name = clean_text(td.get_text())
-                if name:
-                    products.append((seqno, name))
+                seqnos.append(seqno)
 
             if found_on_page == 0:
                 break
@@ -4896,54 +4938,50 @@ def _fetch_cafe_product_tax_map(driver, log=None) -> dict:
                 break
             page += 1
 
-        log(f"카페 상품관리: {len(products)}개 상품 발견")
+        log(f"카페 상품관리: {len(seqnos)}개 상품 발견")
 
-        # ── 각 상품 수정 폼에서 input value 추출 ──
-        for seqno, name in products:
+        # ── 각 상품 수정 폼에서 goods_name + price input 추출 ──
+        for seqno in seqnos:
             detail_url = f"{CAFE_GOODS_WRITE_URL}?seqno={seqno}"
             try:
                 driver.get(detail_url)
                 _time.sleep(0.5)
-                raw_html = driver.page_source
+                soup2 = _BS(driver.page_source, "html.parser")
 
-                # input value 속성을 텍스트로 먼저 치환
-                expanded = _re.sub(
-                    r'<input[^>]*\bvalue=["\']([^"\']*)["\'][^>]*/?>',
-                    r' \1 ',
-                    raw_html,
-                )
-                stripped = _re.sub(r"<[^>]+>", " ", expanded)
-                stripped = stripped.replace("&nbsp;", " ").replace(",", "")
+                # 상품명: <input name="goods_name" value="...">
+                name_inp = soup2.find("input", {"name": "goods_name"})
+                goods_name = (name_inp.get("value", "").strip() if name_inp else "")
 
-                m = _re.search(
-                    r"총액\s*([\d]+).*?공급가액\s*([\d]+).*?부가세\s*([\d]+).*?면세금액\s*([\d]+)",
-                    stripped,
-                )
-                if m:
-                    공급가액 = int(m.group(2))
-                    부가세   = int(m.group(3))
-                    면세금액 = int(m.group(4))
+                # 가격: <input name="price" value="...">
+                price_inp = soup2.find("input", {"name": "price"})
+                price_str = (price_inp.get("value", "0").replace(",", "") if price_inp else "0")
+                try:
+                    price = int(price_str)
+                except ValueError:
+                    price = 0
 
-                    if 면세금액 > 0 and 공급가액 == 0:
-                        과세구분 = "면세"
-                    elif 공급가액 > 0 and 면세금액 == 0:
-                        과세구분 = "과세"
-                    elif 공급가액 > 0 and 면세금액 > 0:
-                        과세구분 = "혼합"
-                    else:
-                        과세구분 = ""
+                if not goods_name:
+                    log(f"  [카페] seqno={seqno}: 상품명 추출 실패, 건너뜀")
+                    continue
+                if price <= 0:
+                    log(f"  [카페][{goods_name}] price=0, 건너뜀")
+                    continue
 
-                    product_tax[name] = {
-                        "공급가액": 공급가액,
-                        "부가세": 부가세,
-                        "면세금액": 면세금액,
-                        "과세구분": 과세구분,
-                    }
-                    log(f"  [카페][{name}] 공급가액={공급가액}, 부가세={부가세}, 면세금액={면세금액} → {과세구분}")
+                # 약속처방 캐시에 퍼지 매칭하여 과세구분 상속
+                matched_key, ref_entry = _fuzzy_match(goods_name)
+                if matched_key:
+                    과세구분 = ref_entry.get("과세구분", "")
+                    entry = _compute_breakdown(price, 과세구분, ref_entry)
+                    log(f"  [카페][{goods_name}] price={price:,} → 매칭=[{matched_key}]({과세구분}) "
+                        f"공급가액={entry['공급가액']:,} 부가세={entry['부가세']:,} 면세금액={entry['면세금액']:,}")
                 else:
-                    log(f"  [카페][{name}] 처방비용 파싱 실패 (seqno={seqno})")
+                    entry = _compute_breakdown(price, "")
+                    log(f"  [카페][{goods_name}] price={price:,} → 약속처방 매칭 실패, 과세구분=?")
+
+                product_tax[goods_name] = entry
+
             except Exception as _e:
-                log(f"  [카페][{name}] 상세 조회 실패 (seqno={seqno}): {_e}")
+                log(f"  [카페] seqno={seqno} 상세 조회 실패: {_e}")
 
     except Exception as _e:
         log(f"카페 상품관리 조회 오류: {_e}")
@@ -4960,7 +4998,7 @@ def _fetch_all_product_tax_map(driver, log=None) -> dict:
     log("=== 약속처방 상품 수집 시작 ===")
     shop_map = _fetch_shop_product_tax_map(driver, log=log)
     log("=== 카페 상품 수집 시작 ===")
-    cafe_map = _fetch_cafe_product_tax_map(driver, log=log)
+    cafe_map = _fetch_cafe_product_tax_map(driver, shop_map=shop_map, log=log)
     merged = dict(shop_map)
     merged.update(cafe_map)
     log(f"=== 전체 수집 완료: 약속처방 {len(shop_map)}개 + 카페 {len(cafe_map)}개 → 통합 {len(merged)}개 ===")
