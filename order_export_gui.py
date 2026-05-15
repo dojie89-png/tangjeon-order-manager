@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.38"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.39"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -5070,8 +5070,8 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
     all_products: list = []
 
     try:
-        # ── 1. 목록 페이지 순회하여 (p_seq, 상품명) 수집 ──
-        products: list = []   # [(p_seq, name), ...]
+        # ── 1. 목록 페이지 순회: 테이블 전체 행 데이터 + p_seq 수집 ──
+        products: list = []   # list[dict] — 목록 테이블 컬럼 값 포함
         seen_pseqs: set = set()
         page = 1
         while True:
@@ -5082,22 +5082,45 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
             soup = _BS(driver.page_source, "html.parser")
 
             found_on_page = 0
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                m = _re.search(r"goods_view\.asp\?(?:.*?&)?p_seq=(\d+)", href)
-                if not m:
+            for tr in soup.find_all("tr"):
+                # goods_view.asp?p_seq=... 링크가 있는 행만 처리
+                a_tags = [a for a in tr.find_all("a", href=True)
+                          if _re.search(r"goods_view\.asp\?.*?p_seq=(\d+)", a["href"])]
+                if not a_tags:
                     continue
-                p_seq = m.group(1)
+                m_seq = _re.search(r"goods_view\.asp\?.*?p_seq=(\d+)", a_tags[0]["href"])
+                if not m_seq:
+                    continue
+                p_seq = m_seq.group(1)
                 if p_seq in seen_pseqs:
                     continue
                 seen_pseqs.add(p_seq)
                 found_on_page += 1
-                name = clean_text(a.get_text())
-                if not name:
-                    td = a.find_parent("td")
-                    if td:
-                        name = clean_text(td.get_text())
-                products.append((p_seq, name or ""))
+
+                row_data: dict = {"p_seq": p_seq}
+
+                # 부모 테이블의 첫 행에서 헤더 추출
+                parent_tbl = tr.find_parent("table")
+                headers: list = []
+                if parent_tbl:
+                    hdr_row = parent_tbl.find("tr")
+                    if hdr_row:
+                        headers = [clean_text(c.get_text())
+                                   for c in hdr_row.find_all(["th", "td"])]
+
+                # 현재 행의 td 값들을 헤더에 매핑
+                cells = tr.find_all("td")
+                for i, cell in enumerate(cells):
+                    col = headers[i] if i < len(headers) else f"열{i+1}"
+                    if not col or col == "p_seq":
+                        continue
+                    row_data[col] = clean_text(cell.get_text())
+
+                # 상품명이 없으면 링크 텍스트로 보충
+                if "상품명" not in row_data or not row_data["상품명"]:
+                    row_data["상품명"] = clean_text(a_tags[0].get_text()) or ""
+
+                products.append(row_data)
 
             if found_on_page == 0:
                 break
@@ -5107,18 +5130,19 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
 
         log(f"상품관리: {len(products)}개 상품 발견 — 상세 수집 시작")
 
-        # ── 2. 각 상품 상세 페이지 파싱 ──
-        for idx, (p_seq, name) in enumerate(products, 1):
+        # ── 2. 각 상품 상세 페이지에서 추가 필드 + 처방비용 파싱 ──
+        for idx, row_data in enumerate(products, 1):
+            p_seq = row_data["p_seq"]
+            name = row_data.get("상품명", "") or p_seq
             log(f"  [{idx}/{len(products)}] {name} (p_seq={p_seq})")
             detail_url = f"{SHOP_GOODS_VIEW_URL}?p_seq={p_seq}"
-            row: dict = {"p_seq": p_seq}
             try:
                 driver.get(detail_url)
                 _time.sleep(0.5)
-                soup = _BS(driver.page_source, "html.parser")
+                soup2 = _BS(driver.page_source, "html.parser")
 
-                # th → 다음 td 값으로 모든 key-value 추출 (중복 키는 뒤 값 덮어씀)
-                for tr in soup.find_all("tr"):
+                # th/td 파싱: 상세 페이지에만 있는 필드 추가 (목록 값 덮어쓰지 않음)
+                for tr in soup2.find_all("tr"):
                     cells = tr.find_all(["th", "td"])
                     i = 0
                     while i < len(cells):
@@ -5126,7 +5150,6 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
                         if cell.name == "th":
                             key = clean_text(cell.get_text())
                             if key and i + 1 < len(cells):
-                                # 값 셀: select/input이 있으면 값 우선
                                 val_cell = cells[i + 1]
                                 sel = val_cell.find("select")
                                 inp = val_cell.find("input")
@@ -5137,12 +5160,13 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
                                     val = (inp.get("value") or "").strip()
                                 else:
                                     val = clean_text(val_cell.get_text())
-                                row[key] = val
+                                if key and key not in row_data:
+                                    row_data[key] = val
                                 i += 2
                                 continue
                         i += 1
 
-                # 처방비용 숫자 보정 (쉼표 제거 후 regex로 확실히 뽑기)
+                # 처방비용 숫자 보정 (쉼표 제거 후 regex)
                 raw = _re.sub(r"<[^>]+>", " ", driver.page_source)
                 raw = raw.replace("&nbsp;", " ").replace(",", "")
                 mc = _re.search(
@@ -5150,27 +5174,26 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
                     raw,
                 )
                 if mc:
-                    row["처방비용_총액"]   = int(mc.group(1))
-                    row["처방비용_공급가액"] = int(mc.group(2))
-                    row["처방비용_부가세"]  = int(mc.group(3))
-                    row["처방비용_면세금액"] = int(mc.group(4))
-                    # 과세 구분
+                    row_data["처방비용_총액"]    = int(mc.group(1))
+                    row_data["처방비용_공급가액"] = int(mc.group(2))
+                    row_data["처방비용_부가세"]   = int(mc.group(3))
+                    row_data["처방비용_면세금액"] = int(mc.group(4))
                     공급 = int(mc.group(2))
                     면세 = int(mc.group(4))
                     if 면세 > 0 and 공급 == 0:
-                        row["처방비용_과세구분"] = "면세"
+                        row_data["처방비용_과세구분"] = "면세"
                     elif 공급 > 0 and 면세 == 0:
-                        row["처방비용_과세구분"] = "과세"
+                        row_data["처방비용_과세구분"] = "과세"
                     elif 공급 > 0 and 면세 > 0:
-                        row["처방비용_과세구분"] = "혼합"
+                        row_data["처방비용_과세구분"] = "혼합"
                     else:
-                        row["처방비용_과세구분"] = ""
+                        row_data["처방비용_과세구분"] = ""
 
             except Exception as _e:
                 log(f"    상세 조회 실패: {_e}")
-                row["_오류"] = str(_e)
+                row_data["_오류"] = str(_e)
 
-            all_products.append(row)
+            all_products.append(row_data)
 
     except Exception as _e:
         log(f"상품 전체 내역 조회 오류: {_e}")
@@ -7348,9 +7371,13 @@ def launch_gui():
                     if rows:
                         import pandas as _pd
                         df = _pd.DataFrame(rows)
-                        # p_seq 를 맨 앞으로
-                        cols = df.columns.tolist()
-                        ordered = (["p_seq"] if "p_seq" in cols else []) + [c for c in cols if c != "p_seq"]
+                        # 열 순서: p_seq → 상품명 → 기타 → 처방비용_* → _오류
+                        _price_cols = [c for c in df.columns if c.startswith("처방비용_")]
+                        _err_cols   = [c for c in df.columns if c.startswith("_")]
+                        _front = [c for c in ["p_seq", "상품명"] if c in df.columns]
+                        _mid   = [c for c in df.columns
+                                  if c not in _front and c not in _price_cols and c not in _err_cols]
+                        ordered = _front + _mid + _price_cols + _err_cols
                         df = df[ordered]
                         df.to_excel(save_path, index=False)
                         root.after(0, lambda: dlg_log_var.set(f"저장 완료: {len(rows)}개 상품 → {os.path.basename(save_path)}"))
