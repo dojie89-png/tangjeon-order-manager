@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.03"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.35"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -36,6 +36,10 @@ SHOP_ORDER_LIST_URL    = f"{BASE_URL}/shop_order/order_list.asp"
 SHOP_ORDER_VIEW_URL    = f"{BASE_URL}/shop_order/order_view.asp"
 SHOP_ORDER_VIEW22_URL  = f"{BASE_URL}/shop_order/order_view22.asp"
 SHOP_ORDER_DELIVERY_INSERT_URL = f"{BASE_URL}/shop_order/delivery_insert.asp"
+SHOP_GOODS_LIST_URL    = f"{BASE_URL}/goods/goods_list.asp"
+SHOP_GOODS_VIEW_URL    = f"{BASE_URL}/goods/goods_view.asp"
+CAFE_GOODS_LIST_URL    = f"{BASE_URL}/cafe_goods/goods_list.asp"
+CAFE_GOODS_WRITE_URL   = f"{BASE_URL}/cafe_goods/goods_write.asp"
 
 ADMIN_ID = os.environ.get("KGINBIO_ADMIN_ID", "")
 ADMIN_PW = os.environ.get("KGINBIO_ADMIN_PW", "")
@@ -47,8 +51,10 @@ MAX_PAGE_SAFETY_LIMIT = 50
 DEFAULT_ALL_PERIOD_MAX_PAGE = 7
 
 # ---------- 자동 업데이트 ----------
-GITHUB_REPO = "dojie89-png/tangjeon-order-manager"
-GITHUB_RELEASE_EXE_NAME = "order_export_gui.exe"
+GITHUB_REPO                    = "dojie89-png/tangjeon-order-manager"
+GITHUB_RELEASE_EXE_NAME        = "order_export_gui.exe"
+GITHUB_CACHE_FILE_NAME         = "goods_tax_cache.json"
+GITHUB_TOKEN_CREDENTIAL_TARGET = "KGINBIO_TANGJEON_GITHUB_TOKEN"
 
 ALL_STATUSES = [
     "접수대기",
@@ -788,6 +794,52 @@ def _delete_windows_admin_credential():
         advapi32.CredDeleteW(WINDOWS_CREDENTIAL_TARGET, _CRED_TYPE_GENERIC, 0)
     except Exception:
         pass
+
+
+def _read_github_token() -> str:
+    """Windows 자격증명에서 GitHub PAT 읽기."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        advapi32 = ctypes.windll.advapi32
+        advapi32.CredReadW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(_PCREDENTIALW)
+        ]
+        advapi32.CredReadW.restype = wintypes.BOOL
+        advapi32.CredFree.argtypes = [ctypes.c_void_p]
+        cred_ptr = _PCREDENTIALW()
+        if not advapi32.CredReadW(GITHUB_TOKEN_CREDENTIAL_TARGET, _CRED_TYPE_GENERIC, 0, ctypes.byref(cred_ptr)):
+            return ""
+        try:
+            cred = cred_ptr.contents
+            blob = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+            return blob.decode("utf-16-le") if blob else ""
+        finally:
+            advapi32.CredFree(cred_ptr)
+    except Exception:
+        return ""
+
+
+def _write_github_token(token: str) -> bool:
+    """Windows 자격증명에 GitHub PAT 저장."""
+    if sys.platform != "win32":
+        return False
+    try:
+        advapi32 = ctypes.windll.advapi32
+        advapi32.CredWriteW.argtypes = [ctypes.POINTER(_CREDENTIALW), wintypes.DWORD]
+        advapi32.CredWriteW.restype = wintypes.BOOL
+        blob = token.encode("utf-16-le")
+        cred = _CREDENTIALW()
+        cred.Type = _CRED_TYPE_GENERIC
+        cred.TargetName = GITHUB_TOKEN_CREDENTIAL_TARGET
+        cred.CredentialBlobSize = len(blob)
+        blob_buf = ctypes.create_string_buffer(blob)
+        cred.CredentialBlob = ctypes.cast(blob_buf, ctypes.c_void_p)
+        cred.Persist = _CRED_PERSIST_LOCAL_MACHINE
+        cred.UserName = "github"
+        return bool(advapi32.CredWriteW(ctypes.byref(cred), 0))
+    except Exception:
+        return False
 
 
 def forget_admin_credentials():
@@ -1649,15 +1701,7 @@ def export_label_excel(xlsx_path: str):
         cancel_count = int(cancel_excl.sum())
         df = df[~cancel_excl].copy()
 
-    # 입원 제외 (조제지시사항 또는 복용첨부파일에 '입원' 포함)
-    excl = pd.Series([False] * len(df), index=df.index)
-    for col in ['조제지시사항', '복용첨부파일']:
-        if col in df.columns:
-            excl |= df[col].str.contains('입원', na=False)
-    inpatient_count = int(excl.sum())
-    df = df[~excl].copy()
-
-    # 한의원 구분
+    # 한의원 구분 (입원 제외 필터보다 먼저 계산 — 오창 감지에 사용)
     def classify_clinic(row):
         clinic = clean_text(str(row.get('한의원명', '') or ''))
         if '고래' in clinic:
@@ -1674,6 +1718,17 @@ def export_label_excel(xlsx_path: str):
 
     df['한의원_구분'] = df.apply(classify_clinic, axis=1)
 
+    # 입원 제외 (조제지시사항 또는 복용첨부파일에 '입원' 포함)
+    # 단, 오창점은 입원이어도 벌크 발송 대상 → 제외하지 않음
+    ochang_mask = df['한의원_구분'].astype(str).str.contains('오창', na=False)
+
+    excl = pd.Series([False] * len(df), index=df.index)
+    for col in ['조제지시사항', '복용첨부파일']:
+        if col in df.columns:
+            excl |= df[col].str.contains('입원', na=False) & ~ochang_mask
+    inpatient_count = int(excl.sum())
+    df = df[~excl].copy()
+
     # 탕전일자: 주문날짜 컬럼을 parse_order_datetime_obj 로 파싱 후 포맷
     def to_tangjeon_date(val):
         dt = parse_order_datetime_obj(clean_text(str(val or '')))
@@ -1684,7 +1739,15 @@ def export_label_excel(xlsx_path: str):
 
     df['용량'] = df['팩수'].astype(str) + '팩 / ' + df['파우치용량'].astype(str)
 
-    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일']
+    # 벌크여부: 한의원으로 택배 → "벌크", 나머지 → ""
+    if '배송구분' in df.columns:
+        df['벌크여부'] = df['배송구분'].apply(
+            lambda v: "벌크" if clean_text(str(v or '')) == "한의원으로 택배" else ""
+        )
+    else:
+        df['벌크여부'] = ''
+
+    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부']
     label_df = df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
     if '팩수' in label_df.columns:
@@ -1739,13 +1802,25 @@ def export_label_excel(xlsx_path: str):
             return f'[{s}]'
         label_df['처방명'] = label_df['처방명'].apply(_wrap_pres)
 
-    # 라벨코드 바로 옆에 처방비고 열 배치
+    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부
     cols_order = list(label_df.columns)
-    if '라벨코드' in cols_order and '처방비고' in cols_order:
-        cols_order.remove('처방비고')
+    for col in ['처방비고', '벌크여부']:
+        if col in cols_order:
+            cols_order.remove(col)
+    if '라벨코드' in cols_order:
         idx = cols_order.index('라벨코드')
-        cols_order.insert(idx + 1, '처방비고')
-        label_df = label_df[cols_order]
+        if '처방비고' in label_df.columns:
+            cols_order.insert(idx + 1, '처방비고')
+            if '벌크여부' in label_df.columns:
+                cols_order.insert(idx + 2, '벌크여부')
+        elif '벌크여부' in label_df.columns:
+            cols_order.insert(idx + 1, '벌크여부')
+    else:
+        # 라벨코드 없으면 처방비고 뒤에 벌크여부
+        if '처방비고' in label_df.columns and '벌크여부' in label_df.columns:
+            cols_order.append('처방비고')
+            cols_order.append('벌크여부')
+    label_df = label_df[cols_order]
 
     # 타임스탬프(YYYYMMDD_HHMMSS) 추출 → "YYYYMMDD_HHMMSS_탕전 라벨 인쇄용.xlsx"
     stem = Path(xlsx_path).stem
@@ -1842,6 +1917,7 @@ _CJ_COLUMNS = [
     "보내는분전화번호",           # L
     "보내는분주소(전체, 분할)",   # M
     "배송메세지1",               # N
+    "묶음여부",                  # O
 ]
 
 
@@ -1855,14 +1931,21 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return ""
         return re.sub(r"[^0-9]", "", str(val)).strip()
 
-    _FORCE_DOSAGE_KW = {"약손", "본가"}
+    _FORCE_DOSAGE_KW = {"약손", "본가"}          # 배송방식 무관, 항상 복용법 첨부
+    _FORCE_DOSAGE_KW_DIRECT = {"판암"}           # 직배송(환자택배)일 때만 복용법 첨부
 
     def is_yakson(row) -> bool:
-        """복용법 강제 포함 병원 여부 판정 (약손한의원, 본가한의원)"""
-        for field in ["한의원명", "보내는분", "회원명"]:
+        """복용법 강제 포함 병원 여부 판정.
+        - 약손·본가: 배송 방식 무관 항상 첨부
+        - 판암점: 한의원으로 택배(벌크)가 아닌 직배송일 때만 첨부"""
+        delivery = clean_text(row.get("배송구분", "") or "")
+        for field in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder"]:
             val = clean_text(str(row.get(field, "") or ""))
             if any(kw in val for kw in _FORCE_DOSAGE_KW):
                 return True
+            if any(kw in val for kw in _FORCE_DOSAGE_KW_DIRECT):
+                if delivery != "한의원으로 택배":
+                    return True
         return False
 
     def 품명_part(ordercode, patient_name, force_dosage: bool = False) -> str:
@@ -1878,8 +1961,15 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return f"{name_with_honorific}_복용법" if name_with_honorific else "복용법"
         return name_with_honorific
 
-    def make_row(base_row, ordercode_str: str, 품명_str: str, 받는분_override: str = "") -> list:
-        """실제 양식 기준 17컬럼 행 (list 반환 — 빈 헤더 컬럼 처리)"""
+    def _dedup_receiver_name(group) -> str:
+        """묶음 그룹의 받는분 성명: 모두 같은 이름이면 하나만, 다르면 ' / ' 연결"""
+        names = [clean_text(r.get("받는분", "")) for r in group]
+        unique = list(dict.fromkeys(names))   # 순서 보존 중복제거
+        return unique[0] if len(unique) == 1 else " / ".join(unique)
+
+    def make_row(base_row, ordercode_str: str, 품명_str: str,
+                 받는분_override: str = "", is_bundle: bool = False) -> list:
+        """실제 양식 기준 행 (list 반환)"""
         receiver_phone = clean_text(base_row.get("받는분_휴대폰", "") or base_row.get("받는분_전화", ""))
         original_sender_phone = clean_text(base_row.get("보내는분_전화", "") or base_row.get("보내는분_휴대폰", ""))
         sender_phone = _lookup_cj_sender_phone(base_row) or original_sender_phone
@@ -1901,6 +1991,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             sender_phone,                                        # L 보내는분전화번호
             clean_text(base_row.get("보내는분_주소", "")),         # M 보내는분주소
             clean_text(base_row.get("배송시메모", "")),           # N 배송메세지1
+            "묶음" if is_bundle else "",                         # O 묶음여부
         ]
 
     # CJ 양식 제외 판정
@@ -1928,8 +2019,11 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             except (ValueError, TypeError):
                 pass
             return True
-        # 입원 건 제외
+        # 입원 건 제외 (오창점은 입원이어도 벌크 발송 → CJ 포함)
         if "입원" in clean_text(row.get("조제지시사항", "") or ""):
+            for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder"]:
+                if "오창" in clean_text(str(row.get(_f, "") or "")):
+                    return False  # 오창점 입원 → 제외 안 함
             return True
         return False
 
@@ -1942,35 +2036,8 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         return re.sub(r'\s+', '', clean_text(str(val) if val else ""))
 
     # -----------------------------------------------------------
-    # pre-pass: [묶음] 주문에서 전화번호별 카운트·주소 집계
-    # → 동일 전화번호를 가진 [묶음] 주문이 2개 이상 AND 모두 동일 배송지 → 전화 키로 묶음
-    # → 주소가 다르면 전화 키 사용 안 함 (배송지 다른 사람까지 오묶음 방지)
-    # → [묶음]이 1건뿐이면 주소로 폴백
-    # -----------------------------------------------------------
-    bundle_phone_counter: dict = {}
-    bundle_phone_addrs: dict = {}   # ph → 해당 전화의 [묶음] 주문 주소 집합
-    for row in master_results:
-        if clean_text(row.get("배송구분", "")) == "방문수령":
-            continue
-        if should_skip_for_cj(row):
-            continue
-        if _has_bundle_tag(row):
-            ph = norm_phone(row.get("받는분_휴대폰", "") or row.get("받는분_전화", ""))
-            if ph:
-                bundle_phone_counter[ph] = bundle_phone_counter.get(ph, 0) + 1
-                addr = norm_addr(row.get("받는분_주소", ""))
-                bundle_phone_addrs.setdefault(ph, set()).add(addr)
-
-    # 전화번호로 묶을 수 있는 경우:
-    #   같은 전화의 [묶음] 주문이 2개 이상 AND 모두 동일 배송지(주소 종류 1개)
-    multi_bundle_phones = {
-        ph for ph, cnt in bundle_phone_counter.items()
-        if cnt >= 2 and len(bundle_phone_addrs.get(ph, set())) == 1
-    }
-
-    # -----------------------------------------------------------
-    # 1단계: bundle_key_set 구성
-    # 키 형식: "ph:{번호}"  또는  "addr:{정규화주소}"
+    # 1단계: bundle_key_set 구성 — 주소 키만 사용 (전화키 제거)
+    # 같은 주소로 가는 [묶음] 태그 주문들을 하나의 그룹으로
     # -----------------------------------------------------------
     bundle_key_set: set = set()
     print("\n[CJ묶음] 1단계: 묶음 키 스캔")
@@ -1988,31 +2055,16 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             continue
         if not _has_bundle_tag(row):
             continue
-        ph = norm_phone(row.get("받는분_휴대폰", "") or row.get("받는분_전화", ""))
-        if ph in multi_bundle_phones:
-            # 같은 전화번호의 [묶음] 주문이 여럿 → 전화 키 사용
-            key = f"ph:{ph}"
+        addr = norm_addr(row.get("받는분_주소", ""))
+        if addr:
+            key = f"addr:{addr}"
             bundle_key_set.add(key)
-            print(f"  {code}: 태그='{extra}', 전화={ph}(복수) → 전화키 '{key}'")
+            print(f"  {code}: 태그='{extra}' → 주소키 (주소 앞20: {addr[:20]})")
         else:
-            # 전화번호가 없거나 해당 전화의 [묶음] 주문이 1건뿐 → 주소 키로 폴백
-            addr = norm_addr(row.get("받는분_주소", ""))
-            if addr:
-                key = f"addr:{addr}"
-                bundle_key_set.add(key)
-                reason = "전화없음" if not ph else f"전화={ph}(단독)"
-                print(f"  {code}: 태그='{extra}', {reason} → 주소키 (주소 앞20: {addr[:20]})")
-            elif ph:
-                # 주소도 없고 전화만 있는 경우 (드문 케이스) → 전화 키 그대로 사용
-                key = f"ph:{ph}"
-                bundle_key_set.add(key)
-                print(f"  {code}: 태그='{extra}', 전화={ph}(단독,주소없음) → 전화키 폴백")
-            else:
-                print(f"  {code}: 태그='{extra}', 전화·주소 모두 없음 → 묶음 미적용")
+            print(f"  {code}: 태그='{extra}', 주소 없음 → 묶음 미적용")
 
     # -----------------------------------------------------------
     # 2단계: 묶음 그룹 구성 (bundle_key → 주문 목록)
-    # 전화키: [묶음] 태그 없어도 포함 (같은 한의원 주문 전부 한 박스)
     # 주소키: [묶음] 태그 있는 주문만 포함 (오주소 오결합 방지)
     # -----------------------------------------------------------
     bundle_groups: dict = {}
@@ -2022,20 +2074,13 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             continue
         if should_skip_for_cj(row):
             continue
-        ph = norm_phone(row.get("받는분_휴대폰", "") or row.get("받는분_전화", ""))
-        ph_key = f"ph:{ph}" if ph else ""
-        if ph_key and ph_key in bundle_key_set:
-            # 전화 키 매칭: 주소도 [묶음] 태그 주문들과 같아야 포함 (다른 주소는 개별 처리)
-            row_addr = norm_addr(row.get("받는분_주소", ""))
-            tagged_addrs = bundle_phone_addrs.get(ph, set())
-            if row_addr in tagged_addrs:
-                bundle_groups.setdefault(ph_key, []).append(row)
-        elif _has_bundle_tag(row):
-            # 주소 키 매칭: [묶음] 태그 있는 주문만
-            addr = norm_addr(row.get("받는분_주소", ""))
-            addr_key = f"addr:{addr}" if addr else ""
-            if addr_key and addr_key in bundle_key_set:
-                bundle_groups.setdefault(addr_key, []).append(row)
+        if not _has_bundle_tag(row):
+            continue
+        # 주소 키 매칭: [묶음] 태그 있는 주문만
+        addr = norm_addr(row.get("받는분_주소", ""))
+        addr_key = f"addr:{addr}" if addr else ""
+        if addr_key and addr_key in bundle_key_set:
+            bundle_groups.setdefault(addr_key, []).append(row)
 
     for bkey, grp in bundle_groups.items():
         codes = [clean_text(r.get("주문코드", "")) for r in grp]
@@ -2057,10 +2102,6 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         if clean_text(row.get("배송구분", "")) == "방문수령":
             return False
         # 이미 [묶음] 태그 기반 bundle_groups에 포함된 주문은 제외
-        ph = norm_phone(row.get("받는분_휴대폰", "") or row.get("받는분_전화", ""))
-        ph_key = f"ph:{ph}" if ph else ""
-        if ph_key and ph_key in bundle_key_set:
-            return False
         if _has_bundle_tag(row):
             addr = norm_addr(row.get("받는분_주소", ""))
             addr_key = f"addr:{addr}" if addr else ""
@@ -2111,10 +2152,6 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
     # 헬퍼: 주문에 해당하는 bundle key 반환
     # -----------------------------------------------------------
     def get_bundle_key(row) -> str:
-        ph = norm_phone(row.get("받는분_휴대폰", "") or row.get("받는분_전화", ""))
-        ph_key = f"ph:{ph}" if ph else ""
-        if ph_key and ph_key in bundle_key_set:
-            return ph_key
         if _has_bundle_tag(row):
             addr = norm_addr(row.get("받는분_주소", ""))
             addr_key = f"addr:{addr}" if addr else ""
@@ -2143,8 +2180,8 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             bundle_keys_done.add(akey)
             group = addr_bundle_groups[akey]
             ordercode_str = "/".join(clean_text(r.get("주문코드", "")) for r in group)
-            # 받는분 성명: "홍길동 / 박보검"
-            names_override = " / ".join(clean_text(r.get("받는분", "")) for r in group)
+            # 받는분 성명: 동일 이름이면 하나만, 다르면 " / " 연결
+            names_override = _dedup_receiver_name(group)
             # 품목명: 각 환자명_복용법 조합을 ", " 로 연결
             명_str = ", ".join(
                 품명_part(
@@ -2155,7 +2192,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                 for r in group
             )
             print(f"  [주소자동묶음] 주문코드={ordercode_str}, 환자={명_str}")
-            rows.append((make_row(group[0], ordercode_str, 명_str, 받는분_override=names_override), True))
+            rows.append((make_row(group[0], ordercode_str, 명_str, 받는분_override=names_override, is_bundle=True), True))
             continue
 
         bkey = get_bundle_key(row)
@@ -2166,13 +2203,13 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                 continue  # 이미 묶음 행 생성됨
             bundle_keys_done.add(bkey)
             group = bundle_groups.get(bkey, [row])
-            kind = "전화묶음" if bkey.startswith("ph:") else "주소묶음"
             # 최대 2명씩 분할 (N=3→2+1, N=4→2+2)
             for ci in range(0, len(group), 2):
                 chunk = group[ci: ci + 2]
                 ordercode_str = "/".join(clean_text(r.get("주문코드", "")) for r in chunk)
-                names_override = " / ".join(clean_text(r.get("받는분", "")) for r in chunk)
-                명_str = "/".join(
+                # 받는분 성명: 동일 이름이면 하나만, 다르면 " / " 연결
+                names_override = _dedup_receiver_name(chunk)
+                명_str = ", ".join(
                     품명_part(
                         clean_text(r.get("주문코드", "")),
                         clean_text(r.get("환자명", "") or ""),
@@ -2180,8 +2217,8 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                     )
                     for r in chunk
                 )
-                print(f"  [{kind}] 주문코드={ordercode_str}, 환자={명_str}")
-                rows.append((make_row(chunk[0], ordercode_str, 명_str, 받는분_override=names_override), True))
+                print(f"  [주소묶음] 주문코드={ordercode_str}, 환자={명_str}")
+                rows.append((make_row(chunk[0], ordercode_str, 명_str, 받는분_override=names_override, is_bundle=True), True))
         else:
             ordercode = clean_text(row.get("주문코드", ""))
             patient_name = clean_text(row.get("환자명", "") or "")
@@ -2195,8 +2232,38 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
     return df
 
 
+# ---------- 로그 tee 헬퍼 ----------
+class _TeeWriter:
+    """sys.stdout을 콘솔 + StringIO 버퍼 양쪽에 동시 기록.
+    PyInstaller windowed exe에서는 sys.stdout이 None이므로 None 가드 필수."""
+    def __init__(self, original, buffer):
+        self._orig = original  # windowed exe에서 None일 수 있음
+        self._buf  = buffer
+    def write(self, data):
+        if self._orig is not None:
+            try:
+                self._orig.write(data)
+            except Exception:
+                pass
+        self._buf.write(data)
+    def flush(self):
+        if self._orig is not None:
+            try:
+                self._orig.flush()
+            except Exception:
+                pass
+    def isatty(self):
+        return False
+
+
 # ---------- 탕전주문 조회 실행 ----------
 def run_job(settings: dict, progress_callback=None):
+    import io as _io
+    _log_buf    = _io.StringIO()
+    _orig_stdout = sys.stdout
+    sys.stdout   = _TeeWriter(_orig_stdout, _log_buf)
+    output_root  = ""          # finally 에서 참조하기 위해 사전 초기화
+
     driver = None
     pdf_driver = None
     download_driver = None
@@ -2239,6 +2306,7 @@ def run_job(settings: dict, progress_callback=None):
         missed_print_logs = []   # 인쇄 누락 목록 (주문코드 공란 / URL 없음 / 출력 실패)
         auto_change_count = 0
         cancel_change_count = 0
+        dispensing_change_count = 0
         pending_status_changes = []
 
         options_main = Options()
@@ -2485,6 +2553,17 @@ def run_job(settings: dict, progress_callback=None):
                         })
                         print(f"    -> 입금대기 전환 예약: {ordercode}")
 
+                    # 정상 주문 → 조제중 자동 전환 예약 (입원·취소 제외)
+                    elif settings.get("auto_dispensing_status") and not inpatient:
+                        pending_status_changes.append({
+                            "kind": "dispensing",
+                            "href": href,
+                            "ordercode": ordercode,
+                            "target_status": "3",
+                            "label": "조제중",
+                        })
+                        print(f"    -> 조제중 전환 예약: {ordercode}")
+
                     # ★ 팩수는 order_view.asp에 없고 탕전주문내역서에만 있음
                     # → latest_decoction에서 보완 (is_bulk_delivery·should_skip_for_cj 모두 master_data 참조)
                     if latest_decoction and not master_data.get("팩수"):
@@ -2529,6 +2608,8 @@ def run_job(settings: dict, progress_callback=None):
                     change_order_status(driver, driver.page_source, ch["href"], ch["target_status"])
                     if ch["kind"] == "cancel":
                         cancel_change_count += 1
+                    elif ch["kind"] == "dispensing":
+                        dispensing_change_count += 1
                     else:
                         auto_change_count += 1
                     print(f"  -> {ch['label']} 전환 완료: {ch['ordercode']}")
@@ -2547,6 +2628,7 @@ def run_job(settings: dict, progress_callback=None):
                 "output_root": "",
                 "auto_change_count": auto_change_count,
                 "cancel_change_count": cancel_change_count,
+                "dispensing_change_count": dispensing_change_count,
                 "no_data": True,
             }
 
@@ -3051,10 +3133,24 @@ def run_job(settings: dict, progress_callback=None):
             "master_results": master_results,
             "auto_change_count": auto_change_count,
             "cancel_change_count": cancel_change_count,
+            "dispensing_change_count": dispensing_change_count,
             "output_root": output_root,
         }
 
     finally:
+        sys.stdout = _orig_stdout
+        # 실행 로그 파일 저장
+        try:
+            _log_text = _log_buf.getvalue()
+            if _log_text.strip() and output_root:
+                ensure_dir(output_root)
+                _log_path = os.path.join(output_root, "실행로그.txt")
+                with open(_log_path, "w", encoding="utf-8") as _lf:
+                    _lf.write(_log_text)
+                print(f"실행 로그 저장: {_log_path}")
+        except Exception:
+            pass
+
         for drv in [driver, pdf_driver, download_driver, print_driver]:
             try:
                 if drv:
@@ -4050,6 +4146,15 @@ def _parse_payment_str(raw: str) -> dict:
     return result
 
 
+def _split_contact(s: str):
+    """'전화 / 휴대전화' 형식 → (전화, 휴대전화) 튜플. / 없으면 휴대전화로 분류."""
+    s = s.strip()
+    if " / " in s:
+        parts = s.split(" / ", 1)
+        return parts[0].strip(), parts[1].strip()
+    return "", s  # 구분자 없으면 전부 휴대전화로
+
+
 def _parse_shop_order_detail_h(html: str) -> dict:
     """order_view.asp (H형/사이트주문) 상세 파싱"""
     from bs4 import BeautifulSoup
@@ -4092,18 +4197,31 @@ def _parse_shop_order_detail_h(html: str) -> dict:
         data["주문자"] = ""
 
     data["한의원명"]   = _text("한의원명")
-    data["연락처"]     = _text("연락처")
+    _ct_tel, _ct_mob  = _split_contact(_text("연락처"))
+    data["연락처_전화"] = _ct_tel
+    data["연락처_휴대"] = _ct_mob
     data["이메일"]     = _text("이메일")
     data["사업자번호"] = ""
 
-    # 주문상품 파싱 (img + 텍스트-수량 구조)
+    # 주문상품 파싱: "제품명 : 주문내용" 형식, 값 있는 항목만 추출
     prod_cell = lv.get("주문상품")
     if prod_cell:
         items = []
-        for row in prod_cell.find_all("tr"):
-            txt = clean_text(row.get_text(" ", strip=True))
-            if txt:
-                items.append(txt)
+        for tr in prod_cell.find_all("tr"):
+            cells = tr.find_all("td")
+            if len(cells) >= 2:
+                name = clean_text(cells[0].get_text(" ", strip=True)).rstrip(":")
+                val  = clean_text(cells[1].get_text(" ", strip=True)).lstrip(":").strip()
+                if val:
+                    items.append(f"{name}: {val}" if name else val)
+            else:
+                txt = clean_text(tr.get_text(" ", strip=True))
+                if ":" in txt:
+                    k, _, v = txt.partition(":")
+                    if v.strip():
+                        items.append(f"{k.strip()}: {v.strip()}")
+                elif txt:
+                    items.append(txt)
         data["주문상품"] = " / ".join(items) if items else clean_text(prod_cell.get_text(" ", strip=True))
     else:
         data["주문상품"] = ""
@@ -4166,10 +4284,12 @@ def _parse_shop_order_detail_h(html: str) -> dict:
 
     # 보내는분
     data["보내는분"]      = _text("이름")   # 첫 번째 이름 셀
-    data["보내는분_연락처"] = ""
+    data["보내는분_전화"] = ""
+    data["보내는분_휴대"] = ""
     data["보내는분_주소"]  = ""
     data["받는분"]        = ""
-    data["받는분_연락처"]  = ""
+    data["받는분_전화"]   = ""
+    data["받는분_휴대"]   = ""
     data["받는분_주소"]   = ""
     data["배송시메모"]    = ""
     data["주문시요청사항"] = ""
@@ -4198,11 +4318,15 @@ def _parse_shop_order_detail_h(html: str) -> dict:
                 val = clean_text(val_cell.get_text(" ", strip=True)) if val_cell else ""
                 if _in_sender:
                     if label == "이름":       data["보내는분"] = val
-                    elif label == "연락처":   data["보내는분_연락처"] = val
+                    elif label == "연락처":
+                        t, m = _split_contact(val)
+                        data["보내는분_전화"] = t; data["보내는분_휴대"] = m
                     elif label == "주소":     data["보내는분_주소"] = val
                 elif _in_receiver:
                     if label == "이름":       data["받는분"] = val
-                    elif label == "연락처":   data["받는분_연락처"] = val
+                    elif label == "연락처":
+                        t, m = _split_contact(val)
+                        data["받는분_전화"] = t; data["받는분_휴대"] = m
                     elif label == "주소":     data["받는분_주소"] = val
                     elif label == "배송시메모":   data["배송시메모"] = val
                     elif label == "주문시 요청사항": data["주문시요청사항"] = val
@@ -4250,7 +4374,9 @@ def _parse_shop_order_detail_c(html: str) -> dict:
         data["주문자"] = ""
 
     data["한의원명"]   = _text("한의원명")
-    data["연락처"]     = _text("주문자연락처")
+    _ct_tel, _ct_mob  = _split_contact(_text("주문자연락처"))
+    data["연락처_전화"] = _ct_tel
+    data["연락처_휴대"] = _ct_mob
     data["이메일"]     = _text("이메일")
 
     # 사업자번호
@@ -4263,25 +4389,37 @@ def _parse_shop_order_detail_c(html: str) -> dict:
     else:
         data["사업자번호"] = ""
 
-    # 주문상품 (텍스트 목록: "공진단(목향) : \n...")
+    # 주문상품: "제품명 : 주문내용" 형식, 내용 있는 항목만 추출
+    # (목록에 여러 제품이 나열되고 실제 주문한 제품에만 값이 기재됨)
     prod_cell = lv.get("주문상품")
     if prod_cell:
-        raw = clean_text(prod_cell.get_text("\n", strip=True))
-        # 수량 있는 항목만 남기기 (": " 뒤에 내용 있는 것)
-        lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
-        # "품목 : " 형식 파싱 — 값이 있는 것만 포함
         items = []
-        for ln in lines:
-            if ":" in ln:
-                parts = ln.split(":", 1)
-                key_part = parts[0].strip()
-                val_part = parts[1].strip() if len(parts) > 1 else ""
-                if val_part:
-                    items.append(f"{key_part}: {val_part}")
-            else:
-                if ln:
-                    items.append(ln)
-        data["주문상품"] = " / ".join(items) if items else raw
+        trs = prod_cell.find_all("tr")
+        if trs:
+            # 내부 테이블 구조: 각 TR에서 name셀 / value셀 파싱
+            for tr in trs:
+                cells = tr.find_all("td")
+                if len(cells) >= 2:
+                    # 셀이 2개 이상: 첫 번째=제품명, 두 번째=값 (":"로 시작할 수 있음)
+                    name = clean_text(cells[0].get_text(" ", strip=True)).rstrip(":")
+                    val  = clean_text(cells[1].get_text(" ", strip=True)).lstrip(":").strip()
+                    if val:
+                        items.append(f"{name}: {val}" if name else val)
+                else:
+                    # 셀이 1개: "제품명 : 값" 한 줄 형식
+                    txt = clean_text(tr.get_text(" ", strip=True))
+                    if ":" in txt:
+                        k, _, v = txt.partition(":")
+                        if v.strip():
+                            items.append(f"{k.strip()}: {v.strip()}")
+        else:
+            # TR 없음 — 줄 단위 텍스트 파싱 (": " 기준으로 값 있는 것만)
+            for ln in [l.strip() for l in prod_cell.get_text("\n", strip=True).split("\n") if l.strip()]:
+                if ":" in ln:
+                    k, _, v = ln.partition(":")
+                    if v.strip():
+                        items.append(f"{k.strip()}: {v.strip()}")
+        data["주문상품"] = " / ".join(items) if items else ""
     else:
         data["주문상품"] = ""
 
@@ -4351,10 +4489,12 @@ def _parse_shop_order_detail_c(html: str) -> dict:
 
     # 보내는분/받는분
     data["보내는분"]       = ""
-    data["보내는분_연락처"] = ""
+    data["보내는분_전화"]  = ""
+    data["보내는분_휴대"]  = ""
     data["보내는분_주소"]   = ""
     data["받는분"]         = ""
-    data["받는분_연락처"]   = ""
+    data["받는분_전화"]    = ""
+    data["받는분_휴대"]    = ""
     data["받는분_주소"]    = ""
     data["배송시메모"]     = ""
     data["주문시요청사항"]  = ""
@@ -4382,11 +4522,15 @@ def _parse_shop_order_detail_c(html: str) -> dict:
                 val = clean_text(val_cell.get_text(" ", strip=True)) if val_cell else ""
                 if _in_sender:
                     if label == "이름":       data["보내는분"] = val
-                    elif label == "연락처":   data["보내는분_연락처"] = val
+                    elif label == "연락처":
+                        t, m = _split_contact(val)
+                        data["보내는분_전화"] = t; data["보내는분_휴대"] = m
                     elif label == "주소":     data["보내는분_주소"] = val
                 elif _in_receiver:
                     if label == "이름":       data["받는분"] = val
-                    elif label == "연락처":   data["받는분_연락처"] = val
+                    elif label == "연락처":
+                        t, m = _split_contact(val)
+                        data["받는분_전화"] = t; data["받는분_휴대"] = m
                     elif label == "주소":     data["받는분_주소"] = val
                     elif label == "배송시메모":     data["배송시메모"] = val
                     elif label == "주문시 요청사항": data["주문시요청사항"] = val
@@ -4394,13 +4538,14 @@ def _parse_shop_order_detail_c(html: str) -> dict:
 
 
 _SHOP_ORDER_EXCEL_COLS = [
-    "주문번호", "경로", "주문일", "주문자", "한의원명", "연락처", "이메일",
+    "주문번호", "경로", "주문일", "주문자", "한의원명", "연락처_전화", "연락처_휴대", "이메일",
     "사업자번호", "상품명_목록", "주문상품",
     "결제금액_총액", "처방비용", "배송료", "포인트", "결제방법",
     "입금", "입금자명", "계산서", "진행상태", "송장번호",
-    "보내는분", "보내는분_연락처", "보내는분_주소",
-    "받는분", "받는분_연락처", "받는분_주소",
+    "보내는분", "보내는분_전화", "보내는분_휴대", "보내는분_주소",
+    "받는분", "받는분_전화", "받는분_휴대", "받는분_주소",
     "배송시메모", "주문시요청사항", "관리자메모", "주문링크",
+    # 면세/과세 열은 품목 수에 따라 동적 생성: 상품1_공급가액, 상품2_공급가액, ...
 ]
 
 _SHOP_CJ_COLUMNS = [
@@ -4415,6 +4560,576 @@ _KGINBIO_SENDER = {
     "phone": "042-861-9759",
     "address": "충청남도 천안시 서북구 성환읍 봉강리 111-35",
 }
+
+
+# 약속처방 주문상품명 → CJ 파일 품목명 변환 맵 (필요 시 추가)
+# 형식: "주문상품 원문": "표기할 품목명"
+_SHOP_PRODUCT_NAME_MAP: dict = {
+    # 예: "공진단(목향) : 1개": "공진단(목향)",
+}
+
+
+def _goods_tax_cache_path() -> str:
+    """goods_tax_cache.json 파일 경로 (exe 옆 또는 소스 파일 옆)"""
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "goods_tax_cache.json")
+
+
+def _load_goods_tax_cache() -> tuple:
+    """캐시 로드. Returns (product_dict, meta_dict). 없거나 실패 시 ({}, {})"""
+    import json as _json
+    path = _goods_tax_cache_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            return data.get("products", {}), data.get("_meta", {})
+        except Exception:
+            pass
+    return {}, {}
+
+
+def _save_goods_tax_cache(product_dict: dict):
+    """상품 면세/과세 맵을 JSON 캐시로 저장"""
+    import json as _json
+    path = _goods_tax_cache_path()
+    data = {
+        "_meta": {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "count": len(product_dict),
+        },
+        "products": product_dict,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _sync_cache_from_github(log=None) -> str:
+    """GitHub Releases 최신 릴리즈에서 goods_tax_cache.json을 내려받아
+    로컬 캐시보다 새로우면 덮어씀. 결과 메시지 반환."""
+    import json as _json
+    if log is None:
+        log = lambda x: None
+    try:
+        cache_url = (
+            f"https://github.com/{GITHUB_REPO}/releases/latest/download/"
+            f"{GITHUB_CACHE_FILE_NAME}"
+        )
+        log("GitHub 상품 캐시 확인 중...")
+        resp = requests.get(cache_url, timeout=15)
+        if resp.status_code == 404:
+            return "GitHub에 캐시 파일 없음 (아직 배포 전)"
+        resp.raise_for_status()
+        remote_data = resp.json()
+        remote_updated = remote_data.get("_meta", {}).get("updated_at", "")
+        remote_count   = len(remote_data.get("products", {}))
+
+        _local, _local_meta = _load_goods_tax_cache()
+        local_updated = _local_meta.get("updated_at", "")
+
+        if remote_updated > local_updated:
+            with open(_goods_tax_cache_path(), "w", encoding="utf-8") as f:
+                _json.dump(remote_data, f, ensure_ascii=False, indent=2)
+            msg = f"GitHub 캐시 업데이트 완료: {remote_count}개 ({remote_updated})"
+        else:
+            msg = f"이미 최신 상태 ({local_updated or '로컬 캐시 없음'})"
+        log(msg)
+        return msg
+    except Exception as _e:
+        msg = f"GitHub 동기화 실패: {_e}"
+        log(msg)
+        return msg
+
+
+def _upload_cache_to_github(token: str, log=None) -> str:
+    """로컬 goods_tax_cache.json을 GitHub Releases 최신 릴리즈에 업로드."""
+    if log is None:
+        log = lambda x: None
+    try:
+        cache_path = _goods_tax_cache_path()
+        if not os.path.exists(cache_path):
+            return "로컬 캐시 파일이 없습니다. 먼저 다운로드/업데이트를 실행하세요."
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        log("GitHub 최신 릴리즈 조회 중...")
+        resp = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            headers=headers, timeout=15,
+        )
+        resp.raise_for_status()
+        release = resp.json()
+        upload_url_base = release["upload_url"].split("{")[0]
+
+        # 기존 동일 asset 삭제
+        for asset in release.get("assets", []):
+            if asset["name"] == GITHUB_CACHE_FILE_NAME:
+                log(f"기존 캐시 asset 삭제 중...")
+                requests.delete(
+                    f"https://api.github.com/repos/{GITHUB_REPO}/releases/assets/{asset['id']}",
+                    headers=headers, timeout=15,
+                )
+
+        with open(cache_path, "rb") as f:
+            content = f.read()
+        log("GitHub에 캐시 파일 업로드 중...")
+        up_resp = requests.post(
+            f"{upload_url_base}?name={GITHUB_CACHE_FILE_NAME}",
+            headers={**headers, "Content-Type": "application/json"},
+            data=content, timeout=30,
+        )
+        up_resp.raise_for_status()
+        msg = f"GitHub 배포 완료 ({len(content):,} bytes)"
+        log(msg)
+        return msg
+    except Exception as _e:
+        msg = f"GitHub 배포 실패: {_e}"
+        log(msg)
+        return msg
+
+
+def _parse_order_products(주문상품_str: str) -> list:
+    """주문상품 문자열 → [(상품명, 수량), ...] 파싱.
+
+    형식 예:
+      "경옥고 30환: 1개 / 공진단- 2개"  →  [("경옥고 30환", "1개"), ("공진단", "2개")]
+    구분자는 ': ' 또는 '- ' 모두 처리.
+    """
+    result = []
+    if not 주문상품_str:
+        return result
+    for part in 주문상품_str.split(" / "):
+        part = part.strip()
+        if not part:
+            continue
+        # 끝부분 "- N개" 또는 ": N개" 패턴으로 이름/수량 분리
+        m = re.match(r'^(.+?)\s*[-:]\s*(\d+)\s*(개)?\s*$', part)
+        if m:
+            name = m.group(1).strip()
+            qty  = f"{m.group(2)}{m.group(3) or '개'}"
+        else:
+            name = part
+            qty  = ""
+        result.append((name, qty))
+    return result
+
+
+def _extract_product_names_for_tax(merged: dict) -> list:
+    """주문 행에서 상품명 리스트 추출 (면세/과세 매핑용).
+
+    주문상품 형식: "경옥고 30환: 1개 / 공진단- 2개"
+      → ["경옥고 30환", "공진단"]
+    상품명_목록: 목록 페이지의 단일 상품명 (폴백용)
+    """
+    주문상품 = clean_text(merged.get("주문상품", "") or "")
+    if 주문상품:
+        names = [name for name, _ in _parse_order_products(주문상품) if name]
+        if names:
+            return names
+    상품명_목록 = clean_text(merged.get("상품명_목록", "") or "")
+    return [상품명_목록] if 상품명_목록 else []
+
+
+def _fetch_shop_product_tax_map(driver, log=None) -> dict:
+    """약속처방 상품관리 목록에서 상품별 처방비용(공급가액/부가세/면세금액/과세구분) 수집.
+
+    Returns:
+        dict: {상품명(str): {"공급가액": int, "부가세": int, "면세금액": int, "과세구분": str}}
+    """
+    import re as _re
+    import time as _time
+    from bs4 import BeautifulSoup as _BS
+    from urllib.parse import urljoin as _urljoin
+
+    if log is None:
+        log = print
+
+    product_tax: dict = {}
+
+    try:
+        # --- 목록 페이지 순회: p_seq 수집 ---
+        products: list = []   # [(p_seq, name), ...]
+        seen_pseqs: set = set()
+        page = 1
+        while True:
+            url = SHOP_GOODS_LIST_URL if page == 1 else f"{SHOP_GOODS_LIST_URL}?page={page}&s_string=&p_bigpart=&p_smallpart="
+            driver.get(url)
+            _time.sleep(0.8)
+            html = driver.page_source
+            soup = _BS(html, "html.parser")
+
+            # p_seq 링크 수집
+            found_on_page = 0
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                m = _re.search(r"goods_view\.asp\?(?:.*?&)?p_seq=(\d+)", href)
+                if not m:
+                    continue
+                p_seq = m.group(1)
+                if p_seq in seen_pseqs:
+                    continue
+                seen_pseqs.add(p_seq)
+                found_on_page += 1
+                # 상품명: 링크 텍스트 우선, 없으면 부모 td
+                name = clean_text(a.get_text())
+                if not name:
+                    td = a.find_parent("td")
+                    if td:
+                        name = clean_text(td.get_text())
+                if name:
+                    products.append((p_seq, name))
+
+            if found_on_page == 0:
+                break  # 더 이상 데이터 없음
+
+            # 다음 페이지 링크 확인
+            next_link = soup.find("a", href=lambda h: h and f"page={page + 1}" in h)
+            if not next_link:
+                break
+            page += 1
+
+        log(f"상품관리: {len(products)}개 상품 발견")
+
+        # --- 상세 페이지에서 처방비용 파싱 ---
+        # 목록에서 클릭해서 들어가는 goods_view.asp 페이지에서 추출
+        for p_seq, name in products:
+            detail_url = f"{SHOP_GOODS_VIEW_URL}?p_seq={p_seq}"
+            try:
+                driver.get(detail_url)
+                _time.sleep(0.5)
+                raw_html = driver.page_source
+                stripped = _re.sub(r"<[^>]+>", " ", raw_html)
+                stripped = stripped.replace("&nbsp;", " ").replace(",", "")
+
+                m = _re.search(
+                    r"총액\s*([\d]+).*?공급가액\s*([\d]+).*?부가세\s*([\d]+).*?면세금액\s*([\d]+)",
+                    stripped,
+                )
+                if m:
+                    공급가액 = int(m.group(2))
+                    부가세   = int(m.group(3))
+                    면세금액 = int(m.group(4))
+
+                    if 면세금액 > 0 and 공급가액 == 0:
+                        과세구분 = "면세"
+                    elif 공급가액 > 0 and 면세금액 == 0:
+                        과세구분 = "과세"
+                    elif 공급가액 > 0 and 면세금액 > 0:
+                        과세구분 = "혼합"
+                    else:
+                        과세구분 = ""
+
+                    product_tax[name] = {
+                        "공급가액": 공급가액,
+                        "부가세": 부가세,
+                        "면세금액": 면세금액,
+                        "과세구분": 과세구분,
+                    }
+                    log(f"  [{name}] 공급가액={공급가액}, 부가세={부가세}, 면세금액={면세금액} → {과세구분}")
+                else:
+                    log(f"  [{name}] 처방비용 파싱 실패 (p_seq={p_seq})")
+            except Exception as _e:
+                log(f"  [{name}] 상세 조회 실패 (p_seq={p_seq}): {_e}")
+
+    except Exception as _e:
+        log(f"상품관리 조회 오류: {_e}")
+        import traceback as _tb
+        log(_tb.format_exc())
+
+    return product_tax
+
+
+def _fetch_cafe_product_tax_map(driver, shop_map: dict = None, log=None) -> dict:
+    """카페 상품관리 목록에서 상품별 처방비용 수집.
+
+    카페 페이지는 단일 <input name="price" value="N"> 필드만 있고
+    공급가액/부가세/면세금액 세목이 없음.
+    → shop_map(약속처방 캐시)에 퍼지 매칭하여 과세구분을 상속받고,
+      price로 공급가액/부가세/면세금액을 역산해 저장.
+    """
+    import re as _re
+    import time as _time
+    import difflib as _dl
+    from bs4 import BeautifulSoup as _BS
+
+    if log is None:
+        log = print
+    if shop_map is None:
+        shop_map = {}
+
+    # ── 퍼지 매칭: 카페 상품명 → 약속처방 캐시 키 ──
+    def _fuzzy_match(cafe_name: str):
+        """카페 상품명을 shop_map 키에 퍼지 매칭. (matched_key, ref_entry) 반환."""
+        if not shop_map:
+            return None, None
+        cafe_norm = _re.sub(r"\s+", "", cafe_name).lower()
+        best_key = None
+        best_score = 0.0
+        for shop_key in shop_map:
+            shop_norm = _re.sub(r"\s+", "", shop_key).lower()
+            # 한쪽이 다른 쪽의 부분 문자열이면 강한 매칭
+            if (len(cafe_norm) >= 3 and len(shop_norm) >= 3
+                    and (cafe_norm in shop_norm or shop_norm in cafe_norm)):
+                score = 0.9
+            else:
+                score = _dl.SequenceMatcher(None, cafe_norm, shop_norm).ratio()
+            if score > best_score:
+                best_score = score
+                best_key = shop_key
+        if best_key and best_score >= 0.55:
+            return best_key, shop_map[best_key]
+        return None, None
+
+    # ── price + 과세구분 → 공급가액/부가세/면세금액 역산 ──
+    def _compute_breakdown(price: int, 과세구분: str, ref: dict = None) -> dict:
+        if 과세구분 == "면세":
+            return {"공급가액": 0, "부가세": 0, "면세금액": price, "과세구분": "면세"}
+        if 과세구분 == "과세":
+            공급가액 = round(price / 1.1)
+            부가세 = price - 공급가액
+            return {"공급가액": 공급가액, "부가세": 부가세, "면세금액": 0, "과세구분": "과세"}
+        if 과세구분 == "혼합" and ref:
+            ref_taxable = ref.get("공급가액", 0)
+            ref_exempt  = ref.get("면세금액", 0)
+            ref_total   = ref_taxable + ref_exempt
+            if ref_total > 0:
+                면세금액 = round(price * ref_exempt / ref_total)
+                과세부분 = price - 면세금액
+                공급가액 = round(과세부분 / 1.1)
+                부가세 = 과세부분 - 공급가액
+                return {"공급가액": 공급가액, "부가세": 부가세, "면세금액": 면세금액, "과세구분": "혼합"}
+        # 매칭 실패 or 알 수 없음
+        return {"공급가액": 0, "부가세": 0, "면세금액": 0, "과세구분": "?"}
+
+    product_tax: dict = {}
+
+    try:
+        # ── 목록 페이지 순회: seqno 수집 ──
+        seqnos: list = []
+        seen_seqs: set = set()
+        page = 1
+        while True:
+            url = (CAFE_GOODS_LIST_URL if page == 1
+                   else f"{CAFE_GOODS_LIST_URL}?page={page}&s_string=&p_bigpart=&p_smallpart=")
+            driver.get(url)
+            _time.sleep(0.8)
+            soup = _BS(driver.page_source, "html.parser")
+
+            found_on_page = 0
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                m = _re.search(r"goods_write\.asp\?(?:.*?&)?seqno=(\d+)", href)
+                if not m:
+                    continue
+                seqno = m.group(1)
+                if seqno in seen_seqs:
+                    continue
+                seen_seqs.add(seqno)
+                found_on_page += 1
+                seqnos.append(seqno)
+
+            if found_on_page == 0:
+                break
+            if not soup.find("a", href=lambda h: h and f"page={page + 1}" in h):
+                break
+            page += 1
+
+        log(f"카페 상품관리: {len(seqnos)}개 상품 발견")
+
+        # ── 각 상품 수정 폼에서 goods_name + price input 추출 ──
+        for seqno in seqnos:
+            detail_url = f"{CAFE_GOODS_WRITE_URL}?seqno={seqno}"
+            try:
+                driver.get(detail_url)
+                _time.sleep(0.5)
+                soup2 = _BS(driver.page_source, "html.parser")
+
+                # 상품명: <input name="goods_name" value="...">
+                name_inp = soup2.find("input", {"name": "goods_name"})
+                goods_name = (name_inp.get("value", "").strip() if name_inp else "")
+
+                # 가격: <input name="price" value="...">
+                price_inp = soup2.find("input", {"name": "price"})
+                price_str = (price_inp.get("value", "0").replace(",", "") if price_inp else "0")
+                try:
+                    price = int(price_str)
+                except ValueError:
+                    price = 0
+
+                if not goods_name:
+                    log(f"  [카페] seqno={seqno}: 상품명 추출 실패, 건너뜀")
+                    continue
+                if price <= 0:
+                    log(f"  [카페][{goods_name}] price=0, 건너뜀")
+                    continue
+
+                # 약속처방 캐시에 퍼지 매칭하여 과세구분 상속
+                matched_key, ref_entry = _fuzzy_match(goods_name)
+                if matched_key:
+                    과세구분 = ref_entry.get("과세구분", "")
+                    entry = _compute_breakdown(price, 과세구분, ref_entry)
+                    log(f"  [카페][{goods_name}] price={price:,} → 매칭=[{matched_key}]({과세구분}) "
+                        f"공급가액={entry['공급가액']:,} 부가세={entry['부가세']:,} 면세금액={entry['면세금액']:,}")
+                else:
+                    entry = _compute_breakdown(price, "")
+                    log(f"  [카페][{goods_name}] price={price:,} → 약속처방 매칭 실패, 과세구분=?")
+
+                product_tax[goods_name] = entry
+
+            except Exception as _e:
+                log(f"  [카페] seqno={seqno} 상세 조회 실패: {_e}")
+
+    except Exception as _e:
+        log(f"카페 상품관리 조회 오류: {_e}")
+        import traceback as _tb
+        log(_tb.format_exc())
+
+    return product_tax
+
+
+def _fetch_all_product_tax_map(driver, log=None) -> dict:
+    """약속처방 + 카페 상품 모두 수집하여 통합 dict 반환."""
+    if log is None:
+        log = print
+    log("=== 약속처방 상품 수집 시작 ===")
+    shop_map = _fetch_shop_product_tax_map(driver, log=log)
+    log("=== 카페 상품 수집 시작 ===")
+    cafe_map = _fetch_cafe_product_tax_map(driver, shop_map=shop_map, log=log)
+    merged = dict(shop_map)
+    merged.update(cafe_map)
+    log(f"=== 전체 수집 완료: 약속처방 {len(shop_map)}개 + 카페 {len(cafe_map)}개 → 통합 {len(merged)}개 ===")
+    return merged
+
+
+def _fetch_shop_product_all_details(driver, log=None) -> list:
+    """약속처방 상품관리 목록 전체 상세 내역 수집 → 엑셀 저장용.
+
+    Returns:
+        list[dict]: 상품별 전체 필드 딕셔너리 목록.
+                    각 dict 키는 페이지에서 동적으로 추출되므로 상품마다 다를 수 있음.
+    """
+    import re as _re
+    import time as _time
+    from bs4 import BeautifulSoup as _BS
+
+    if log is None:
+        log = print
+
+    all_products: list = []
+
+    try:
+        # ── 1. 목록 페이지 순회하여 (p_seq, 상품명) 수집 ──
+        products: list = []   # [(p_seq, name), ...]
+        seen_pseqs: set = set()
+        page = 1
+        while True:
+            url = (SHOP_GOODS_LIST_URL if page == 1
+                   else f"{SHOP_GOODS_LIST_URL}?page={page}&s_string=&p_bigpart=&p_smallpart=")
+            driver.get(url)
+            _time.sleep(0.8)
+            soup = _BS(driver.page_source, "html.parser")
+
+            found_on_page = 0
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                m = _re.search(r"goods_view\.asp\?(?:.*?&)?p_seq=(\d+)", href)
+                if not m:
+                    continue
+                p_seq = m.group(1)
+                if p_seq in seen_pseqs:
+                    continue
+                seen_pseqs.add(p_seq)
+                found_on_page += 1
+                name = clean_text(a.get_text())
+                if not name:
+                    td = a.find_parent("td")
+                    if td:
+                        name = clean_text(td.get_text())
+                products.append((p_seq, name or ""))
+
+            if found_on_page == 0:
+                break
+            if not soup.find("a", href=lambda h: h and f"page={page + 1}" in h):
+                break
+            page += 1
+
+        log(f"상품관리: {len(products)}개 상품 발견 — 상세 수집 시작")
+
+        # ── 2. 각 상품 상세 페이지 파싱 ──
+        for idx, (p_seq, name) in enumerate(products, 1):
+            log(f"  [{idx}/{len(products)}] {name} (p_seq={p_seq})")
+            detail_url = f"{SHOP_GOODS_VIEW_URL}?p_seq={p_seq}"
+            row: dict = {"p_seq": p_seq}
+            try:
+                driver.get(detail_url)
+                _time.sleep(0.5)
+                soup = _BS(driver.page_source, "html.parser")
+
+                # th → 다음 td 값으로 모든 key-value 추출 (중복 키는 뒤 값 덮어씀)
+                for tr in soup.find_all("tr"):
+                    cells = tr.find_all(["th", "td"])
+                    i = 0
+                    while i < len(cells):
+                        cell = cells[i]
+                        if cell.name == "th":
+                            key = clean_text(cell.get_text())
+                            if key and i + 1 < len(cells):
+                                # 값 셀: select/input이 있으면 값 우선
+                                val_cell = cells[i + 1]
+                                sel = val_cell.find("select")
+                                inp = val_cell.find("input")
+                                if sel:
+                                    opt = sel.find("option", selected=True)
+                                    val = clean_text(opt.get_text()) if opt else clean_text(sel.get_text())
+                                elif inp:
+                                    val = (inp.get("value") or "").strip()
+                                else:
+                                    val = clean_text(val_cell.get_text())
+                                row[key] = val
+                                i += 2
+                                continue
+                        i += 1
+
+                # 처방비용 숫자 보정 (쉼표 제거 후 regex로 확실히 뽑기)
+                raw = _re.sub(r"<[^>]+>", " ", driver.page_source)
+                raw = raw.replace("&nbsp;", " ").replace(",", "")
+                mc = _re.search(
+                    r"총액\s*([\d]+).*?공급가액\s*([\d]+).*?부가세\s*([\d]+).*?면세금액\s*([\d]+)",
+                    raw,
+                )
+                if mc:
+                    row["처방비용_총액"]   = int(mc.group(1))
+                    row["처방비용_공급가액"] = int(mc.group(2))
+                    row["처방비용_부가세"]  = int(mc.group(3))
+                    row["처방비용_면세금액"] = int(mc.group(4))
+                    # 과세 구분
+                    공급 = int(mc.group(2))
+                    면세 = int(mc.group(4))
+                    if 면세 > 0 and 공급 == 0:
+                        row["처방비용_과세구분"] = "면세"
+                    elif 공급 > 0 and 면세 == 0:
+                        row["처방비용_과세구분"] = "과세"
+                    elif 공급 > 0 and 면세 > 0:
+                        row["처방비용_과세구분"] = "혼합"
+                    else:
+                        row["처방비용_과세구분"] = ""
+
+            except Exception as _e:
+                log(f"    상세 조회 실패: {_e}")
+                row["_오류"] = str(_e)
+
+            all_products.append(row)
+
+    except Exception as _e:
+        log(f"상품 전체 내역 조회 오류: {_e}")
+        import traceback as _tb
+        log(_tb.format_exc())
+
+    return all_products
 
 
 def build_shop_order_cj_df(results: list) -> pd.DataFrame:
@@ -4442,17 +5157,16 @@ def build_shop_order_cj_df(results: list) -> pd.DataFrame:
 
         clinic = clean_text(r.get("한의원명", "") or "")
         recv_name = clean_text(r.get("받는분", "") or "")
-        recv_phone = clean_text(r.get("받는분_연락처", "") or "")
-        # 전화번호에서 유효한 번호만 (010-XXXX-XXXX 형식 우선)
-        import re as _re
-        phones = _re.findall(r"0\d{1,2}-\d{3,4}-\d{4}", recv_phone)
-        recv_phone = phones[0] if phones else recv_phone
+        # 받는분 전화: 휴대 우선, 없으면 전화
+        recv_phone = clean_text(r.get("받는분_휴대", "") or r.get("받는분_전화", "") or "")
 
-        product = clean_text(r.get("상품명_목록", "") or r.get("주문상품", "") or "")
+        # 실제 주문 내용(주문상품) 우선, 없으면 상품명_목록 폴백
+        _raw_product = clean_text(r.get("주문상품", "") or r.get("상품명_목록", "") or "")
+        product = _SHOP_PRODUCT_NAME_MAP.get(_raw_product, _raw_product)
 
         # 보내는분 정보
         sender_name = clean_text(r.get("보내는분", "") or "")
-        sender_phone = clean_text(r.get("보내는분_연락처", "") or "")
+        sender_phone = clean_text(r.get("보내는분_휴대", "") or r.get("보내는분_전화", "") or "")
         sender_addr = clean_text(r.get("보내는분_주소", "") or "")
         if not sender_name:
             sender_name  = _KGINBIO_SENDER["name"]
@@ -4479,7 +5193,11 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         if progress_callback:
             progress_callback(pct, msg)
 
+    _sp_log_lines: list = []
+    _sp_output_root = [""]   # finally에서 참조하기 위한 mutable 컨테이너
+
     def log(msg: str):
+        _sp_log_lines.append(str(msg))
         print(msg)
         if log_callback:
             log_callback(msg)
@@ -4491,6 +5209,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         start_date    = settings.get("start_date", "")
         end_date      = settings.get("end_date", "")
         status_codes  = settings.get("status_codes", [""])   # 리스트, [""] = 전체
+        route_filter  = settings.get("route_filter", set())  # {"H","C"} 또는 비어있으면 전체
         search_type   = settings.get("search_type", "name")
         search_str    = settings.get("search_str", "")
         max_pages     = settings.get("max_pages", 50)
@@ -4511,6 +5230,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
 
         run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_root = os.path.join(base_dir, f"약속처방_{run_ts}")
+        _sp_output_root[0] = output_root
 
         update_progress(5, "드라이버 시작 중...")
         from selenium.webdriver.chrome.options import Options as _COptions
@@ -4520,48 +5240,92 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         login_driver(driver, ADMIN_ID, ADMIN_PW)
         update_progress(10, "로그인 완료")
 
+        # --- 상품 면세/과세 맵 빌드 ---
+        # 캐시 있으면 항상 자동 사용. 없을 때만 사용자 선택(download_goods_first)으로 다운로드.
+        _cached_goods, _cached_meta = _load_goods_tax_cache()
+        if _cached_goods:
+            product_tax_map = _cached_goods
+            log(f"상품 캐시 사용: {len(product_tax_map)}개 "
+                f"({_cached_meta.get('updated_at', '?')} 기준)")
+        elif settings.get("download_goods_first", False):
+            log("상품 캐시 없음 → 다운로드 시작...")
+            update_progress(12, "상품 면세/과세 정보 수집 중...")
+            product_tax_map = _fetch_all_product_tax_map(driver, log=log)
+            if product_tax_map:
+                _save_goods_tax_cache(product_tax_map)
+                log(f"상품 캐시 저장 완료: {len(product_tax_map)}개")
+            else:
+                log("⚠ 상품 정보 수집 실패 — 면세/과세 열 빈값으로 진행")
+                product_tax_map = {}
+        else:
+            product_tax_map = {}
+            log("⚠ 상품 캐시 없음 — 면세/과세 열 빈값으로 진행")
+        update_progress(15, "상품 정보 준비 완료")
+
         # --- 목록 수집 ---
+        # 폼이 POST 방식이므로 1페이지는 JS 폼 제출, 2페이지부터는 페이지 링크 클릭
+        def _submit_page1(status_code):
+            driver.get(SHOP_ORDER_LIST_URL)
+            _time.sleep(0.8)
+            driver.execute_script(f"""
+                var f = document.form2 || document.forms[0];
+                if (!f) return;
+                f.s_date.value     = '{start_date}';
+                f.e_date.value     = '{end_date}';
+                f.search.value     = '{search_type}';
+                f.s_string.value   = '{search_str}';
+                f.order_ings.value = '{status_code}';
+            """)
+            driver.execute_script("(document.form2 || document.forms[0]).submit();")
+            _time.sleep(1.2)
+
+        from bs4 import BeautifulSoup as _BS
         all_list_rows = []
         seen_order_nos = set()
         for status_code in status_codes:
             if _cancelled():
                 break
             log(f"진행상태 코드={status_code or '전체'} 수집 시작")
+            _submit_page1(status_code)
             page = 1
             while page <= max_pages:
                 if _cancelled():
                     log("취소 요청 → 목록 수집 중단")
                     break
-                params = (f"s_date={start_date}&e_date={end_date}"
-                          f"&order_ings={status_code}&search={search_type}"
-                          f"&s_string={search_str}&page={page}")
-                url = f"{SHOP_ORDER_LIST_URL}?{params}"
-                log(f"  요청 URL: {url}")
-                driver.get(url)
-                _time.sleep(0.8)
                 html = driver.page_source
-                log(f"  HTML 길이: {len(html)} / 현재URL: {driver.current_url[:80]}")
                 rows = _parse_shop_order_list_page(html)
                 if not rows:
                     log(f"페이지 {page}: 데이터 없음 → 수집 완료")
-                    log(f"  [디버그] HTML 앞부분: {html[:300].strip()}")
                     break
-                # 중복 주문번호 제거 (여러 상태코드 순회 시)
                 new_rows = [r for r in rows if r["주문번호"] not in seen_order_nos]
                 for r in new_rows:
                     seen_order_nos.add(r["주문번호"])
                 all_list_rows.extend(new_rows)
                 log(f"페이지 {page}: {len(rows)}건 (신규 {len(new_rows)}건, 누계 {len(all_list_rows)}건)")
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "html.parser")
+                # 다음 페이지 링크 찾아서 직접 클릭
+                soup = _BS(html, "html.parser")
                 next_link = soup.find("a", href=lambda h: h and f"page={page+1}" in h)
                 if not next_link:
                     log("마지막 페이지 도달")
                     break
+                next_href = next_link["href"]
+                if not next_href.startswith("http"):
+                    from urllib.parse import urljoin
+                    next_href = urljoin(f"{BASE_URL}/shop_order/", next_href)
+                driver.get(next_href)
+                _time.sleep(0.8)
                 page += 1
 
         total = len(all_list_rows)
         log(f"목록 총 {total}건 수집")
+
+        # 경로 필터 적용 (H/C 중 선택된 것만)
+        if route_filter and route_filter != {"H", "C"}:
+            before = total
+            all_list_rows = [r for r in all_list_rows if r.get("경로", "") in route_filter]
+            total = len(all_list_rows)
+            log(f"경로 필터({'/'.join(sorted(route_filter))}): {before}건 → {total}건")
+
         if total == 0:
             update_progress(100, "수집 완료 (0건)")
             return
@@ -4603,23 +5367,88 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
                 merged["송장번호"] = merged["송장번호_상세"]
             # 주문 링크
             merged["주문링크"] = detail_url
+
+            # 주문상품 파싱: [(이름, 수량), ...]
+            merged["_product_list"] = _parse_order_products(
+                clean_text(merged.get("주문상품", "") or "")
+            )
+
+            # 상품별 면세/과세 정보 수집 (품목 수만큼 리스트로 보관)
+            _prod_names = _extract_product_names_for_tax(merged)
+            _tax_list = []
+            for _n in _prod_names:
+                _hit = product_tax_map.get(_n)
+                if _hit is None:
+                    # 공백 정규화 후 재시도
+                    _n_norm = re.sub(r"\s+", " ", _n.strip())
+                    _hit = next(
+                        (v for k, v in product_tax_map.items()
+                         if re.sub(r"\s+", " ", k.strip()) == _n_norm),
+                        None,
+                    )
+                if _hit is None:
+                    log(f"  ⚠ 캐시 미매칭: '{_n}'")
+                    _hit = {}
+                _tax_list.append(_hit)
+            merged["_tax_list"] = _tax_list
+
             master_results.append(merged)
+
+        # --- 주문상품 동적 열 전개: 주문상품1 / 주문상품1_수량 / 주문상품2 / ... ---
+        _max_order_prods = max(
+            (len(r.get("_product_list", [])) for r in master_results), default=0
+        ) if master_results else 0
+        _order_prod_col_names: list = []
+        for _i in range(_max_order_prods):
+            _order_prod_col_names += [f"주문상품{_i+1}", f"주문상품{_i+1}_수량"]
+        for r in master_results:
+            _plist = r.get("_product_list", [])
+            for _i in range(_max_order_prods):
+                if _i < len(_plist):
+                    r[f"주문상품{_i+1}"]     = _plist[_i][0]
+                    r[f"주문상품{_i+1}_수량"] = _plist[_i][1]
+                else:
+                    r[f"주문상품{_i+1}"]     = ""
+                    r[f"주문상품{_i+1}_수량"] = ""
+
+        # --- 면세/과세 열 동적 전개: 상품1_공급가액 / 부가세 / 면세금액 / 과세구분 ---
+        _max_prods = max((len(r.get("_tax_list", [])) for r in master_results), default=0) if master_results else 0
+        _tax_col_names: list = []
+        for _i in range(_max_prods):
+            _pfx = f"상품{_i + 1}_"
+            _tax_col_names += [f"{_pfx}공급가액", f"{_pfx}부가세", f"{_pfx}면세금액", f"{_pfx}과세구분"]
+        for r in master_results:
+            _tlist = r.get("_tax_list", [])
+            for _i in range(_max_prods):
+                _pfx = f"상품{_i + 1}_"
+                _ti  = _tlist[_i] if _i < len(_tlist) else {}
+                r[f"{_pfx}공급가액"] = _ti.get("공급가액", "")
+                r[f"{_pfx}부가세"]   = _ti.get("부가세", "")
+                r[f"{_pfx}면세금액"] = _ti.get("면세금액", "")
+                r[f"{_pfx}과세구분"] = _ti.get("과세구분", "")
+
+        # 열 순서: 기본 열 중 "주문상품" 바로 뒤에 주문상품N 삽입, 맨 뒤에 세금 열
+        _base = list(_SHOP_ORDER_EXCEL_COLS)
+        try:
+            _ins = _base.index("주문상품") + 1
+        except ValueError:
+            _ins = len(_base)
+        _excel_all_cols = _base[:_ins] + _order_prod_col_names + _base[_ins:] + _tax_col_names
 
         # --- 저장 ---
         update_progress(92, "파일 저장 중...")
         ensure_dir(output_root)
 
         if save_excel:
-            excel_cols = [c for c in _SHOP_ORDER_EXCEL_COLS if c in (master_results[0] if master_results else {})]
             # 없는 컬럼은 빈 문자열로 채우기
             for r in master_results:
-                for c in _SHOP_ORDER_EXCEL_COLS:
+                for c in _excel_all_cols:
                     if c not in r:
                         r[c] = ""
-            df_excel = pd.DataFrame(master_results, columns=_SHOP_ORDER_EXCEL_COLS)
+            df_excel = pd.DataFrame(master_results, columns=_excel_all_cols)
             excel_path = os.path.join(output_root, f"{run_ts}_약속처방_주문마스터.xlsx")
             df_excel.to_excel(excel_path, index=False)
-            log(f"엑셀 저장: {excel_path}")
+            log(f"엑셀 저장: {excel_path} ({_max_prods}개 상품 열)")
 
         if save_cj:
             cj_df = build_shop_order_cj_df(master_results)
@@ -4637,6 +5466,18 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         update_progress(100, f"오류 발생: {e}")
         return None
     finally:
+        # 실행 로그 파일 저장
+        try:
+            _log_content = "\n".join(_sp_log_lines)
+            _root = _sp_output_root[0]
+            if _log_content.strip() and _root:
+                ensure_dir(_root)
+                _log_path = os.path.join(_root, "실행로그.txt")
+                with open(_log_path, "w", encoding="utf-8") as _lf:
+                    _lf.write(_log_content)
+                print(f"실행 로그 저장: {_log_path}")
+        except Exception:
+            pass
         try:
             if driver:
                 driver.quit()
@@ -4648,7 +5489,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
 def launch_gui():
     root = tk.Tk()
     root.title(f"케이진 탕전주문 관리 v{APP_VERSION}")
-    root.geometry("540x820")
+    root.geometry("540x840")
     root.resizable(False, True)   # 세로 리사이즈 허용 (맥에서 하단 잘림 대응)
 
     # 진행바 완료/오류 색상 (네이티브 테마 유지, Windows vista 테마에서 background 적용됨)
@@ -4903,6 +5744,7 @@ def launch_gui():
     print_printer_var = tk.StringVar(value="")
     auto_change_status_var = tk.BooleanVar(value=True)
     auto_cancel_status_var = tk.BooleanVar(value=True)
+    auto_dispensing_var = tk.BooleanVar(value=False)
 
     # ── 2단 레이아웃: col0=파일저장/자동전환, col1=자동인쇄/PDF저장
     tab1.columnconfigure(0, weight=0)
@@ -4939,6 +5781,7 @@ def launch_gui():
     group_auto.grid(row=4, column=0, sticky="nsew", pady=(2, 2), padx=(0, 4))
     ttk.Checkbutton(group_auto, text="입원건 입금대기 자동 전환", variable=auto_change_status_var).grid(row=0, column=0, sticky="w")
     ttk.Checkbutton(group_auto, text="취소요청건 환불취소 자동 전환", variable=auto_cancel_status_var).grid(row=1, column=0, sticky="w")
+    ttk.Checkbutton(group_auto, text="정상 주문 조제중 자동 전환", variable=auto_dispensing_var).grid(row=2, column=0, sticky="w")
 
     # ── 그룹 3: 자동 인쇄 (우측 상단)
     group3 = ttk.LabelFrame(tab1, text="자동 인쇄", padding=(8, 4))
@@ -5051,6 +5894,7 @@ def launch_gui():
         save_cj_excel_var, save_label_excel_var,
         save_decoction_pdf_var, save_dispense_pdf_var, save_dosage_text_pdf_var, save_dosage_attachment_var,
         print_decoction_var, print_dispense_var, auto_change_status_var, auto_cancel_status_var,
+        auto_dispensing_var,
     ]
 
     def select_all_groups():
@@ -5223,6 +6067,7 @@ def launch_gui():
             "print_inpatient_last": print_inpatient_last_var.get(),
             "auto_change_status": auto_change_status_var.get(),
             "auto_cancel_status": auto_cancel_status_var.get(),
+            "auto_dispensing_status": auto_dispensing_var.get(),
             "save_decoction_sheet": save_decoction_sheet_var.get(),
             "hospital_filter": hospital_filter_var.get().strip(),
             "payment_filter": payment_filter_var.get().strip(),
@@ -5249,6 +6094,7 @@ def launch_gui():
                 master_results = result["master_results"] if result else []
                 auto_change_count = result["auto_change_count"] if result else 0
                 cancel_change_count = result["cancel_change_count"] if result else 0
+                dispensing_change_count = result.get("dispensing_change_count", 0) if result else 0
 
                 if cancel_event.is_set():
                     root.after(0, lambda: messagebox.showinfo("취소", "작업이 취소되었습니다."))
@@ -5289,7 +6135,8 @@ def launch_gui():
                             f"{status_summary}\n\n"
                             f"[한의원별]\n{hosp_summary}\n\n"
                             f"입금대기 자동전환: {auto_change_count}건\n"
-                            f"환불취소 자동전환: {cancel_change_count}건"
+                            f"환불취소 자동전환: {cancel_change_count}건\n"
+                            f"조제중 자동전환: {dispensing_change_count}건"
                         )
                         _result_title = "완료"
                     root.after(0, lambda m=msg, t=_result_title: messagebox.showinfo(t, m))
@@ -5497,24 +6344,46 @@ def launch_gui():
         log_text.config(state="disabled")
 
         def worker():
+            _log_lines = []
+
+            def _log_capture(msg: str):
+                _log_lines.append(msg)
+                append_log(msg)
+
+            def _save_delivery_log():
+                try:
+                    _save_dir = output_dir_var.get().strip()
+                    if not (_save_dir and os.path.isdir(_save_dir)):
+                        _save_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+                                    else os.path.dirname(os.path.abspath(__file__))
+                    _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    _log_path = os.path.join(_save_dir, f"{_ts}_발송처리_로그.txt")
+                    with open(_log_path, "w", encoding="utf-8") as _lf:
+                        _lf.write("\n".join(_log_lines))
+                    append_log(f"[로그 저장] {_log_path}")
+                except Exception as _e:
+                    append_log(f"[로그 저장 실패] {_e}")
+
             try:
                 for detail_path in detail_paths:
                     if delivery_cancel_event.is_set():
                         break
-                    append_log(f"\n=== 파일 처리 중: {os.path.basename(detail_path)} ===")
+                    _log_capture(f"\n=== 파일 처리 중: {os.path.basename(detail_path)} ===")
                     run_delivery_job(
                         detail_path,
                         start_date=start_date,
                         end_date=end_date,
-                        log_callback=append_log,
+                        log_callback=_log_capture,
                         progress_callback=delivery_gui_progress,
                         cancel_check=delivery_cancel_event.is_set,
                     )
+                _save_delivery_log()
                 if delivery_cancel_event.is_set():
                     root.after(0, lambda: messagebox.showinfo("취소", "작업이 취소됐어요."))
                 else:
                     root.after(0, lambda: messagebox.showinfo("완료", "모든 파일 처리가 완료됐어요."))
             except Exception as e:
+                _save_delivery_log()
                 err_msg = str(e)
                 if isinstance(e, NoWorkFound):
                     root.after(0, lambda m=err_msg: messagebox.showinfo("조회 결과 없음", m))
@@ -6071,9 +6940,21 @@ def launch_gui():
     ttk.Button(sp_sbtn_frame, text="전체해제", width=7,
                command=lambda: [v.set(False) for v in sp_status_vars.values()]).grid(row=1, column=0, sticky="ew")
 
+    # ── 주문경로 ──
+    sp_route_lf = ttk.LabelFrame(tab4, text="주문경로", padding=(8, 4))
+    sp_route_lf.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+    sp_route_vars = {}
+    for _ri, _rt in enumerate(["H", "C"]):
+        _rv = tk.BooleanVar(value=True)
+        sp_route_vars[_rt] = _rv
+        _label = "H (사이트 직접주문)" if _rt == "H" else "C (카페 주문)"
+        ttk.Checkbutton(sp_route_lf, text=_label, variable=_rv).grid(
+            row=0, column=_ri, sticky="w", padx=(0, 16)
+        )
+
     # ── 조회 기간 ──
     sp_date_lf = ttk.LabelFrame(tab4, text="조회 기간", padding=(8, 4))
-    sp_date_lf.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+    sp_date_lf.grid(row=2, column=0, sticky="ew", pady=(0, 4))
     sp_date_lf.columnconfigure(1, weight=1)
 
     ttk.Label(sp_date_lf, text="시작").grid(row=0, column=0, sticky="w", padx=(0, 6))
@@ -6129,7 +7010,7 @@ def launch_gui():
 
     # ── 필터 ──
     sp_filter_lf = ttk.LabelFrame(tab4, text="필터", padding=(8, 4))
-    sp_filter_lf.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+    sp_filter_lf.grid(row=3, column=0, sticky="ew", pady=(0, 4))
     sp_filter_lf.columnconfigure(1, weight=1)
 
     sp_search_target_var = tk.StringVar(value="주문자")
@@ -6152,15 +7033,260 @@ def launch_gui():
 
     # ── 파일 저장 ──
     sp_save_lf = ttk.LabelFrame(tab4, text="파일 저장", padding=(8, 4))
-    sp_save_lf.grid(row=3, column=0, sticky="ew", pady=(0, 4))
+    sp_save_lf.grid(row=4, column=0, sticky="ew", pady=(0, 4))
     sp_save_excel_var = tk.BooleanVar(value=True)
     sp_save_cj_var    = tk.BooleanVar(value=False)
     ttk.Checkbutton(sp_save_lf, text="주문마스터 엑셀", variable=sp_save_excel_var).grid(row=0, column=0, sticky="w")
     ttk.Checkbutton(sp_save_lf, text="대한통운 파일 업로드 양식", variable=sp_save_cj_var).grid(row=0, column=1, sticky="w", padx=(16, 0))
 
+    # ── 상품 내역 ──
+    sp_goods_lf = ttk.LabelFrame(tab4, text="상품 내역", padding=(8, 4))
+    sp_goods_lf.grid(row=5, column=0, sticky="ew", pady=(0, 4))
+    sp_goods_lf.columnconfigure(0, weight=1)
+
+    sp_goods_status_var = tk.StringVar(value="캐시 없음")
+    ttk.Label(sp_goods_lf, textvariable=sp_goods_status_var, foreground="gray",
+              font=("Malgun Gothic", 9)).grid(row=0, column=0, sticky="w")
+
+    # 상품 캐시는 항상 자동 사용. 업데이트는 [상품 내역 관리] 다이얼로그에서 수동으로.
+
+    def _refresh_goods_status_label():
+        _c, _m = _load_goods_tax_cache()
+        if _c:
+            sp_goods_status_var.set(
+                f"캐시: {_m.get('count', len(_c))}개 상품 ({_m.get('updated_at', '?')} 기준)"
+            )
+        else:
+            sp_goods_status_var.set("캐시 없음")
+
+    def _open_goods_dialog():
+        dlg = tk.Toplevel(root)
+        dlg.title("상품 내역 관리")
+        dlg.geometry("640x520")
+        dlg.resizable(False, True)
+        dlg.transient(root)
+        dlg.grab_set()
+
+        # 캐시 상태
+        info_lf = ttk.LabelFrame(dlg, text="캐시 상태", padding=(8, 4))
+        info_lf.pack(fill="x", padx=8, pady=(8, 4))
+        dlg_cache_var = tk.StringVar()
+        ttk.Label(info_lf, textvariable=dlg_cache_var).pack(anchor="w")
+
+        # 상품 목록
+        list_lf = ttk.LabelFrame(dlg, text="상품 목록", padding=(8, 4))
+        list_lf.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        dlg_goods_text = tk.Text(list_lf, state="disabled",
+                                  font=("Malgun Gothic", 9), wrap="none")
+        dlg_goods_text.pack(side="left", fill="both", expand=True)
+        dlg_goods_scroll = ttk.Scrollbar(list_lf, orient="vertical", command=dlg_goods_text.yview)
+        dlg_goods_scroll.pack(side="right", fill="y")
+        dlg_goods_text.configure(yscrollcommand=dlg_goods_scroll.set)
+
+        # 로그 (다운로드 진행 시)
+        dlg_log_var = tk.StringVar(value="")
+        ttk.Label(dlg, textvariable=dlg_log_var, foreground="gray",
+                  font=("Malgun Gothic", 8)).pack(anchor="w", padx=8)
+
+        # 버튼 행
+        btn_f = ttk.Frame(dlg)
+        btn_f.pack(fill="x", padx=8, pady=(0, 8))
+        dlg_update_btn = ttk.Button(btn_f, text="사이트 다운로드")
+        dlg_update_btn.pack(side="left", padx=(0, 4))
+        dlg_export_btn = ttk.Button(btn_f, text="전체 내역 엑셀")
+        dlg_export_btn.pack(side="left", padx=(0, 4))
+        ttk.Button(btn_f, text="닫기", command=dlg.destroy).pack(side="right")
+
+        def _dlg_refresh():
+            _c, _m = _load_goods_tax_cache()
+            if _c:
+                updated_at = _m.get("updated_at", "?")
+                count = _m.get("count", len(_c))
+                dlg_cache_var.set(f"마지막 업데이트: {updated_at}  |  상품 수: {count}개")
+                dlg_goods_text.configure(state="normal")
+                dlg_goods_text.delete("1.0", "end")
+                for name, info in _c.items():
+                    공급가액 = info.get("공급가액", "?")
+                    면세금액 = info.get("면세금액", "?")
+                    과세구분 = info.get("과세구분", "?")
+                    dlg_goods_text.insert("end",
+                        f"{name}  |  공급가액={공급가액}  면세금액={면세금액}  →  {과세구분}\n")
+                dlg_goods_text.configure(state="disabled")
+            else:
+                dlg_cache_var.set("캐시 없음 — 다운로드 버튼을 눌러 가져오세요.")
+                dlg_goods_text.configure(state="normal")
+                dlg_goods_text.delete("1.0", "end")
+                dlg_goods_text.configure(state="disabled")
+            _refresh_goods_status_label()
+
+        _dlg_refresh()
+
+        def _do_download():
+            if _global_running.is_set():
+                messagebox.showwarning("실행 중", "다른 작업이 실행 중입니다.\n완료 후 다시 시도해주세요.", parent=dlg)
+                return
+            if not ensure_admin_credentials(root):
+                return
+            dlg_update_btn.config(state="disabled", text="다운로드 중...")
+            dlg_log_var.set("Chrome 드라이버 시작 중...")
+
+            def _thread():
+                _drv = None
+                try:
+                    from selenium.webdriver.chrome.options import Options as _COptions
+                    _opts = _COptions()
+                    _opts.add_argument("--start-maximized")
+                    _drv = webdriver.Chrome(options=_opts)
+                    login_driver(_drv, ADMIN_ID, ADMIN_PW)
+                    root.after(0, lambda: dlg_log_var.set("로그인 완료, 상품 목록 수집 중..."))
+
+                    def _log_cb(msg):
+                        root.after(0, lambda _m=msg: dlg_log_var.set(_m))
+
+                    result = _fetch_all_product_tax_map(_drv, log=_log_cb)
+                    if result:
+                        _save_goods_tax_cache(result)
+                        root.after(0, lambda: dlg_log_var.set(f"완료: {len(result)}개 상품 저장"))
+
+                        # GitHub 배포 여부 자동 제안
+                        def _after_save(_cnt=len(result)):
+                            ans = messagebox.askyesno(
+                                "다운로드 완료",
+                                f"{_cnt}개 상품 정보 저장 완료!\n\nGitHub에 배포해서 다른 직원들에게 공유할까요?",
+                                parent=dlg,
+                            )
+                            if ans:
+                                _do_github_deploy_silent(dlg, dlg_log_var)
+
+                        root.after(0, _after_save)
+                    else:
+                        root.after(0, lambda: dlg_log_var.set("상품 정보를 가져오지 못했습니다."))
+                        root.after(0, lambda: messagebox.showwarning(
+                            "주의", "상품 정보를 가져오지 못했습니다.", parent=dlg))
+                except Exception as _e:
+                    _em = str(_e)
+                    root.after(0, lambda: dlg_log_var.set(f"오류: {_em}"))
+                    root.after(0, lambda: messagebox.showerror("오류", _em, parent=dlg))
+                finally:
+                    if _drv:
+                        try:
+                            _drv.quit()
+                        except Exception:
+                            pass
+                    root.after(0, lambda: dlg_update_btn.config(
+                        state="normal", text="사이트 다운로드"))
+                    root.after(0, _dlg_refresh)
+
+            threading.Thread(target=_thread, daemon=True).start()
+
+        dlg_update_btn.config(command=_do_download)
+
+        def _do_export_excel():
+            if _global_running.is_set():
+                messagebox.showwarning("실행 중", "다른 작업이 실행 중입니다.\n완료 후 다시 시도해주세요.", parent=dlg)
+                return
+            if not ensure_admin_credentials(root):
+                return
+            # 저장 경로 먼저 선택
+            save_path = filedialog.asksaveasfilename(
+                parent=dlg,
+                title="상품 전체 내역 저장",
+                defaultextension=".xlsx",
+                filetypes=[("Excel 파일", "*.xlsx"), ("모든 파일", "*.*")],
+                initialfile=f"상품전체내역_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            )
+            if not save_path:
+                return
+
+            dlg_export_btn.config(state="disabled", text="수집 중...")
+            dlg_log_var.set("Chrome 드라이버 시작 중...")
+
+            def _thread():
+                _drv = None
+                try:
+                    from selenium.webdriver.chrome.options import Options as _COptions
+                    _opts = _COptions()
+                    _opts.add_argument("--start-maximized")
+                    _drv = webdriver.Chrome(options=_opts)
+                    login_driver(_drv, ADMIN_ID, ADMIN_PW)
+                    root.after(0, lambda: dlg_log_var.set("로그인 완료, 상품 전체 내역 수집 중..."))
+
+                    def _log_cb(msg):
+                        root.after(0, lambda _m=msg: dlg_log_var.set(_m))
+
+                    rows = _fetch_shop_product_all_details(_drv, log=_log_cb)
+                    if rows:
+                        import pandas as _pd
+                        df = _pd.DataFrame(rows)
+                        # p_seq 를 맨 앞으로
+                        cols = df.columns.tolist()
+                        ordered = (["p_seq"] if "p_seq" in cols else []) + [c for c in cols if c != "p_seq"]
+                        df = df[ordered]
+                        df.to_excel(save_path, index=False)
+                        root.after(0, lambda: dlg_log_var.set(f"저장 완료: {len(rows)}개 상품 → {os.path.basename(save_path)}"))
+                        root.after(0, lambda: messagebox.showinfo(
+                            "저장 완료",
+                            f"{len(rows)}개 상품 전체 내역을 저장했습니다.\n\n{save_path}",
+                            parent=dlg,
+                        ))
+                    else:
+                        root.after(0, lambda: dlg_log_var.set("상품 정보를 가져오지 못했습니다."))
+                        root.after(0, lambda: messagebox.showwarning("주의", "상품 정보를 가져오지 못했습니다.", parent=dlg))
+                except Exception as _e:
+                    _em = str(_e)
+                    root.after(0, lambda: dlg_log_var.set(f"오류: {_em}"))
+                    root.after(0, lambda: messagebox.showerror("오류", _em, parent=dlg))
+                finally:
+                    if _drv:
+                        try:
+                            _drv.quit()
+                        except Exception:
+                            pass
+                    root.after(0, lambda: dlg_export_btn.config(state="normal", text="전체 내역 엑셀"))
+
+            threading.Thread(target=_thread, daemon=True).start()
+
+        dlg_export_btn.config(command=_do_export_excel)
+
+        # ── GitHub 배포 (다운로드 완료 후 자동 제안용) ──
+        def _do_github_deploy_silent(parent_dlg, log_var):
+            """다운로드 완료 후 자동으로 호출 — PAT 확인 후 GitHub 업로드."""
+            from tkinter import simpledialog as _sd
+            token = _read_github_token()
+            if not token:
+                token = _sd.askstring(
+                    "GitHub Personal Access Token",
+                    "GitHub PAT를 입력하세요. (repo 권한 필요)\n한 번 저장하면 이후엔 자동으로 사용됩니다.",
+                    parent=parent_dlg,
+                )
+                if not token:
+                    return
+                token = token.strip()
+                _write_github_token(token)
+
+            log_var.set("GitHub 배포 중...")
+
+            def _t(_tok=token):
+                msg = _upload_cache_to_github(
+                    _tok,
+                    log=lambda m: root.after(0, lambda _m=m: log_var.set(_m))
+                )
+                if "완료" in msg:
+                    root.after(0, lambda: messagebox.showinfo("배포 완료", msg, parent=parent_dlg))
+                else:
+                    root.after(0, lambda: messagebox.showerror("배포 실패", msg, parent=parent_dlg))
+
+            threading.Thread(target=_t, daemon=True).start()
+
+    ttk.Button(sp_goods_lf, text="상품 내역 관리", command=_open_goods_dialog).grid(
+        row=0, column=2, sticky="e", padx=(0, 0))
+
+    # 시작 시 캐시 상태 표시
+    _refresh_goods_status_label()
+
     # ── 저장 위치 (탭1과 공유) ──
     sp_out_frame = ttk.Frame(tab4)
-    sp_out_frame.grid(row=4, column=0, sticky="ew", pady=(0, 4))
+    sp_out_frame.grid(row=6, column=0, sticky="ew", pady=(0, 4))
     sp_out_frame.columnconfigure(1, weight=1)
     ttk.Label(sp_out_frame, text="저장 위치:").grid(row=0, column=0, sticky="w", padx=(0, 6))
     ttk.Entry(sp_out_frame, textvariable=output_dir_var).grid(row=0, column=1, sticky="ew", padx=(0, 4))
@@ -6168,16 +7294,16 @@ def launch_gui():
 
     # ── 상태 + 진행바 ──
     sp_status_label = ttk.Label(tab4, text="대기 중", foreground="gray")
-    sp_status_label.grid(row=5, column=0, sticky="w", pady=(4, 2))
+    sp_status_label.grid(row=7, column=0, sticky="w", pady=(4, 2))
 
     sp_progress_var = tk.IntVar(value=0)
     sp_progress = ttk.Progressbar(tab4, orient="horizontal", mode="determinate",
                                    maximum=100, variable=sp_progress_var)
-    sp_progress.grid(row=6, column=0, sticky="ew", pady=(0, 6))
+    sp_progress.grid(row=8, column=0, sticky="ew", pady=(0, 6))
 
     # ── 버튼 행 ──
     sp_btn_frame = ttk.Frame(tab4)
-    sp_btn_frame.grid(row=7, column=0, sticky="ew", pady=(4, 0))
+    sp_btn_frame.grid(row=9, column=0, sticky="ew", pady=(4, 0))
 
     sp_cancel_event = threading.Event()
     sp_run_btn = ttk.Button(sp_btn_frame, text="실행")
@@ -6195,11 +7321,11 @@ def launch_gui():
 
     # ── 로그 ──
     sp_log_text = tk.Text(tab4, height=12, width=70, state="disabled", font=("Malgun Gothic", 9))
-    sp_log_text.grid(row=8, column=0, sticky="nsew", pady=(8, 0))
+    sp_log_text.grid(row=10, column=0, sticky="nsew", pady=(8, 0))
     sp_log_scroll = ttk.Scrollbar(tab4, orient="vertical", command=sp_log_text.yview)
-    sp_log_scroll.grid(row=8, column=1, sticky="ns")
+    sp_log_scroll.grid(row=10, column=1, sticky="ns")
     sp_log_text.configure(yscrollcommand=sp_log_scroll.set)
-    tab4.rowconfigure(8, weight=1)
+    tab4.rowconfigure(10, weight=1)
 
     def _sp_log_wheel(event):
         sp_log_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -6233,9 +7359,24 @@ def launch_gui():
         if not ensure_admin_credentials(root):
             return
 
-        # 날짜 값 읽기 (placeholder면 빈 문자열)
-        start_raw = _ph_get(sp_start_entry).strip().replace("-", "/")
-        end_raw   = _ph_get(sp_end_entry).strip().replace("-", "/")
+        # 상품 캐시 확인 — 없으면 미리 물어봄
+        _cached_check, _ = _load_goods_tax_cache()
+        _download_goods_first = False
+        if not _cached_check:
+            ans = messagebox.askyesnocancel(
+                "상품 캐시 없음",
+                "저장된 상품 정보가 없습니다.\n\n"
+                "[예]  지금 상품 정보 다운로드 후 주문 조회 진행\n"
+                "[아니오]  면세/과세 열 비운 채로 진행\n"
+                "[취소]  중단",
+            )
+            if ans is None:   # 취소
+                return
+            _download_goods_first = bool(ans)  # True=예, False=아니오
+
+        # 날짜 값 읽기: YYYY-MM-DD 그대로 (사이트 입력 필드 포맷)
+        start_raw = _ph_get(sp_start_entry).strip()
+        end_raw   = _ph_get(sp_end_entry).strip()
 
         # 진행상태: 체크된 것들 → 각각 별도 요청 (사이트는 단일 상태 필터만 지원)
         # 체크된 상태코드 목록 수집
@@ -6250,10 +7391,15 @@ def launch_gui():
         search_type = _st_map.get(sp_search_target_var.get(), "name")
         search_str  = sp_search_filter_var.get().strip()
 
+        # 주문경로 필터: 둘 다 체크되거나 둘 다 미체크면 전체 (빈 set)
+        _route_checked = {r for r, v in sp_route_vars.items() if v.get()}
+        _route_filter = _route_checked if 0 < len(_route_checked) < 2 else set()
+
         sp_settings = {
             "start_date": start_raw,
             "end_date": end_raw,
             "status_codes": checked_codes,
+            "route_filter": _route_filter,
             "search_type": search_type,
             "search_str": search_str,
             "save_excel": sp_save_excel_var.get(),
@@ -6261,6 +7407,7 @@ def launch_gui():
             "output_dir": output_dir_var.get().strip(),
             "max_pages": 100,
             "cancel_event": sp_cancel_event,
+            "download_goods_first": _download_goods_first,
         }
 
         sp_log_text.configure(state="normal")
@@ -6290,8 +7437,18 @@ def launch_gui():
                     if os.path.isdir(result):
                         root.after(0, lambda d=result: sp_open_folder_btn.config(
                             state="normal",
-                            command=lambda: os.startfile(d)
+                            command=lambda _d=d: (
+                                os.startfile(_d) if sys.platform == "win32"
+                                else os.system(f"open '{_d}'")
+                            )
                         ))
+                        # 완료 시 자동으로 폴더 열기
+                        def _auto_open(d=result):
+                            if sys.platform == "win32":
+                                os.startfile(d)
+                            elif sys.platform == "darwin":
+                                os.system(f"open '{d}'")
+                        root.after(0, _auto_open)
                     root.after(0, lambda r=result: messagebox.showinfo("완료", f"저장 완료!\n{r}"))
             except Exception as e:
                 err = str(e)
@@ -6301,6 +7458,7 @@ def launch_gui():
                 _global_running.clear()
                 root.after(0, lambda: sp_run_btn.config(state="normal"))
                 root.after(0, lambda: sp_cancel_btn.config(state="disabled"))
+                root.after(0, _refresh_goods_status_label)  # 캐시 갱신 후 상태 라벨 업데이트
 
         threading.Thread(target=run_thread, daemon=True).start()
 
@@ -6308,6 +7466,14 @@ def launch_gui():
 
     # 앱 시작 2초 후 업데이트 체크 (UI 로딩 완료 후 실행)
     root.after(2000, lambda: check_and_prompt_update(root))
+
+    # 앱 시작 4초 후 GitHub 상품 캐시 자동 동기화 (백그라운드, 조용히)
+    def _startup_gh_cache_sync():
+        result = _sync_cache_from_github()
+        if "업데이트 완료" in result:
+            root.after(0, _refresh_goods_status_label)
+
+    root.after(4000, lambda: threading.Thread(target=_startup_gh_cache_sync, daemon=True).start())
 
     root.mainloop()
 
