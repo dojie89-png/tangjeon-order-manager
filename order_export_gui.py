@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.35"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.36"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -4569,6 +4569,15 @@ _SHOP_PRODUCT_NAME_MAP: dict = {
 }
 
 
+# 카페 상품 → 약속처방 상품 수동 매핑 (퍼지 매칭이 실패하거나 잘못 매칭될 때 사용)
+# 형식: "카페 상품명에 포함된 키워드": "약속처방 상품명에 포함된 키워드"
+# 카페 상품명에 키워드가 포함되면, 약속처방 캐시에서 대응 키워드를 포함한 항목을 우선 매칭
+_CAFE_TO_SHOP_NAME_MAP: dict = {
+    "낙산균": "프리바이오틱스 유산균",
+    # 매칭이 안 맞는 다른 카페 상품들도 발견되는 대로 여기에 추가
+}
+
+
 def _goods_tax_cache_path() -> str:
     """goods_tax_cache.json 파일 경로 (exe 옆 또는 소스 파일 옆)"""
     if getattr(sys, "frozen", False):
@@ -4716,6 +4725,14 @@ def _parse_order_products(주문상품_str: str) -> list:
             qty  = ""
         result.append((name, qty))
     return result
+
+
+def _parse_qty_int(qty_str: str) -> int:
+    """수량 문자열 ('10개', '3', '') → 정수. 못 읽으면 1."""
+    if not qty_str:
+        return 1
+    m = re.match(r"\s*(\d+)", str(qty_str))
+    return int(m.group(1)) if m else 1
 
 
 def _extract_product_names_for_tax(merged: dict) -> list:
@@ -4867,6 +4884,18 @@ def _fetch_cafe_product_tax_map(driver, shop_map: dict = None, log=None) -> dict
         if not shop_map:
             return None, None
         cafe_norm = _re.sub(r"\s+", "", cafe_name).lower()
+
+        # ── 0단계: 수동 매핑 사전 우선 적용 ──
+        for _cafe_kw, _shop_kw in _CAFE_TO_SHOP_NAME_MAP.items():
+            _cafe_kw_norm = _re.sub(r"\s+", "", _cafe_kw).lower()
+            if _cafe_kw_norm and _cafe_kw_norm in cafe_norm:
+                _shop_kw_norm = _re.sub(r"\s+", "", _shop_kw).lower()
+                # 약속처방 캐시에서 대응 키워드 포함하는 첫 항목
+                for shop_key in shop_map:
+                    if _shop_kw_norm in _re.sub(r"\s+", "", shop_key).lower():
+                        return shop_key, shop_map[shop_key]
+
+        # ── 1단계: 퍼지 매칭 (부분 문자열 + SequenceMatcher) ──
         best_key = None
         best_score = 0.0
         for shop_key in shop_map:
@@ -5411,29 +5440,83 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
                     r[f"주문상품{_i+1}"]     = ""
                     r[f"주문상품{_i+1}_수량"] = ""
 
-        # --- 면세/과세 열 동적 전개: 상품1_공급가액 / 부가세 / 면세금액 / 과세구분 ---
+        # --- 면세/과세 열 동적 전개 ---
+        # 수량반영 금액 군: 상품N_공급가액금액 / 부가세금액 / 면세금액금액
+        # 단가 군:        상품N_공급가액 / 부가세 / 면세금액 / 과세구분
         _max_prods = max((len(r.get("_tax_list", [])) for r in master_results), default=0) if master_results else 0
-        _tax_col_names: list = []
+        _qty_tax_col_names: list = []   # 수량 반영 금액 군 (주문링크 옆)
+        _unit_tax_col_names: list = []  # 단가 군 (맨 끝)
         for _i in range(_max_prods):
             _pfx = f"상품{_i + 1}_"
-            _tax_col_names += [f"{_pfx}공급가액", f"{_pfx}부가세", f"{_pfx}면세금액", f"{_pfx}과세구분"]
+            _qty_tax_col_names  += [f"{_pfx}공급가액금액", f"{_pfx}부가세금액", f"{_pfx}면세금액금액"]
+            _unit_tax_col_names += [f"{_pfx}공급가액", f"{_pfx}부가세", f"{_pfx}면세금액", f"{_pfx}과세구분"]
+
         for r in master_results:
             _tlist = r.get("_tax_list", [])
+            # 주문 단위 합계: 공급가액합계(면세금액 포함, 부가세 제외) / 부가세합계
+            _sum_supply = 0   # 공급가액 + 면세금액 (수량 반영)
+            _sum_vat    = 0   # 부가세 (수량 반영)
             for _i in range(_max_prods):
                 _pfx = f"상품{_i + 1}_"
                 _ti  = _tlist[_i] if _i < len(_tlist) else {}
-                r[f"{_pfx}공급가액"] = _ti.get("공급가액", "")
-                r[f"{_pfx}부가세"]   = _ti.get("부가세", "")
-                r[f"{_pfx}면세금액"] = _ti.get("면세금액", "")
+                _qty = _parse_qty_int(r.get(f"주문상품{_i+1}_수량", "")) if _i < len(_tlist) else 0
+
+                _supply_unit = _ti.get("공급가액", 0) or 0
+                _vat_unit    = _ti.get("부가세",   0) or 0
+                _exempt_unit = _ti.get("면세금액", 0) or 0
+
+                # 단가 컬럼
+                r[f"{_pfx}공급가액"] = _supply_unit if _ti else ""
+                r[f"{_pfx}부가세"]   = _vat_unit    if _ti else ""
+                r[f"{_pfx}면세금액"] = _exempt_unit if _ti else ""
                 r[f"{_pfx}과세구분"] = _ti.get("과세구분", "")
 
-        # 열 순서: 기본 열 중 "주문상품" 바로 뒤에 주문상품N 삽입, 맨 뒤에 세금 열
+                # 수량 반영 금액 컬럼
+                if _ti and _qty > 0:
+                    _supply_amt = _supply_unit * _qty
+                    _vat_amt    = _vat_unit    * _qty
+                    _exempt_amt = _exempt_unit * _qty
+                    r[f"{_pfx}공급가액금액"] = _supply_amt
+                    r[f"{_pfx}부가세금액"]   = _vat_amt
+                    r[f"{_pfx}면세금액금액"] = _exempt_amt
+                    # 합계: 공급가액합계는 공급가액+면세금액(부가세 제외), 부가세합계는 부가세만
+                    _sum_supply += _supply_amt + _exempt_amt
+                    _sum_vat    += _vat_amt
+                else:
+                    r[f"{_pfx}공급가액금액"] = ""
+                    r[f"{_pfx}부가세금액"]   = ""
+                    r[f"{_pfx}면세금액금액"] = ""
+
+            r["공급가액합계"] = _sum_supply if _sum_supply or _sum_vat else ""
+            r["부가세합계"]   = _sum_vat    if _sum_supply or _sum_vat else ""
+
+        # 열 순서:
+        #   기본열의 "포인트" 바로 뒤  → 공급가액합계, 부가세합계
+        #   "주문상품" 바로 뒤        → 주문상품N / 주문상품N_수량
+        #   "주문링크" 바로 뒤        → 수량반영 금액 군 → 단가 군
         _base = list(_SHOP_ORDER_EXCEL_COLS)
+        _sum_cols = ["공급가액합계", "부가세합계"]
         try:
-            _ins = _base.index("주문상품") + 1
+            _pt_idx = _base.index("포인트") + 1
+            _base = _base[:_pt_idx] + _sum_cols + _base[_pt_idx:]
         except ValueError:
-            _ins = len(_base)
-        _excel_all_cols = _base[:_ins] + _order_prod_col_names + _base[_ins:] + _tax_col_names
+            _base = _base + _sum_cols
+        try:
+            _op_idx = _base.index("주문상품") + 1
+        except ValueError:
+            _op_idx = len(_base)
+        _base = _base[:_op_idx] + _order_prod_col_names + _base[_op_idx:]
+        # 주문링크 뒤에 수량반영 금액 군 → 단가 군 (주문링크가 마지막이면 그냥 뒤에 붙음)
+        try:
+            _lk_idx = _base.index("주문링크") + 1
+        except ValueError:
+            _lk_idx = len(_base)
+        _excel_all_cols = (
+            _base[:_lk_idx]
+            + _qty_tax_col_names
+            + _unit_tax_col_names
+            + _base[_lk_idx:]
+        )
 
         # --- 저장 ---
         update_progress(92, "파일 저장 중...")
