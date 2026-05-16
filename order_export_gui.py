@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.42"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.43"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -5194,18 +5194,67 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
     return all_products
 
 
-def _fetch_cafe_product_all_details(driver, log=None) -> list:
+def _fetch_cafe_product_all_details(driver, shop_map: dict = None, log=None) -> list:
     """카페 상품관리 목록 전체 상세 내역 수집 → 엑셀 저장용.
 
-    각 상품의 goods_write.asp 폼 필드를 모두 추출한다.
+    - goods_write.asp 폼에서 bgcolor=D8E5F0 라벨 기준으로 필드 추출
+    - 처방비용(price)을 shop_map 퍼지 매칭으로 과세구분 판단 후 약속처방과 동일한
+      처방비용_총액 / 처방비용_공급가액 / 처방비용_부가세 / 처방비용_면세금액 / 처방비용_과세구분 산출
     구분 열: 'C'
     """
     import re as _re
     import time as _time
+    import difflib as _dl
     from bs4 import BeautifulSoup as _BS
 
     if log is None:
         log = print
+    if shop_map is None:
+        shop_map = {}
+
+    # ── 퍼지 매칭: 카페 상품명 → shop_map 키 ──
+    def _fmatch(cafe_name: str):
+        if not shop_map:
+            return None, None
+        cn = _re.sub(r"\s+", "", cafe_name).lower()
+        for kw, skw in _CAFE_TO_SHOP_NAME_MAP.items():
+            kn = _re.sub(r"\s+", "", kw).lower()
+            if kn and kn in cn:
+                sn = _re.sub(r"\s+", "", skw).lower()
+                for k, v in shop_map.items():
+                    if sn in _re.sub(r"\s+", "", k).lower():
+                        return k, v
+        best_k, best_s = None, 0.0
+        for k, v in shop_map.items():
+            kn = _re.sub(r"\s+", "", k).lower()
+            if len(cn) >= 3 and len(kn) >= 3:
+                s = 0.9 if (cn in kn or kn in cn) else _dl.SequenceMatcher(None, cn, kn).ratio()
+            else:
+                s = 0.0
+            if s > best_s:
+                best_s, best_k = s, k
+        return (best_k, shop_map[best_k]) if best_k and best_s >= 0.55 else (None, None)
+
+    # ── 과세구분 → 공급가액/부가세/면세금액 역산 ──
+    def _breakdown(price: int, 과세구분: str, ref: dict = None) -> dict:
+        base = {"처방비용_총액": price}
+        if 과세구분 == "면세":
+            return {**base, "처방비용_공급가액": 0, "처방비용_부가세": 0,
+                    "처방비용_면세금액": price, "처방비용_과세구분": "면세"}
+        if 과세구분 == "과세":
+            공급 = round(price / 1.1)
+            return {**base, "처방비용_공급가액": 공급, "처방비용_부가세": price - 공급,
+                    "처방비용_면세금액": 0, "처방비용_과세구분": "과세"}
+        if 과세구분 == "혼합" and ref:
+            rt = ref.get("공급가액", 0); re_ = ref.get("면세금액", 0); rtot = rt + re_
+            if rtot > 0:
+                exempt = round(price * re_ / rtot)
+                taxable = price - exempt
+                공급 = round(taxable / 1.1)
+                return {**base, "처방비용_공급가액": 공급, "처방비용_부가세": taxable - 공급,
+                        "처방비용_면세금액": exempt, "처방비용_과세구분": "혼합"}
+        return {**base, "처방비용_공급가액": 0, "처방비용_부가세": 0,
+                "처방비용_면세금액": 0, "처방비용_과세구분": "?"}
 
     all_products: list = []
 
@@ -5223,8 +5272,7 @@ def _fetch_cafe_product_all_details(driver, log=None) -> list:
 
             found_on_page = 0
             for a in soup.find_all("a", href=True):
-                href = a["href"]
-                m = _re.search(r"goods_write\.asp\?(?:.*?&)?seqno=(\d+)", href)
+                m = _re.search(r"goods_write\.asp\?(?:.*?&)?seqno=(\d+)", a["href"])
                 if not m:
                     continue
                 seqno = m.group(1)
@@ -5242,51 +5290,54 @@ def _fetch_cafe_product_all_details(driver, log=None) -> list:
 
         log(f"카페 상품관리: {len(seqnos)}개 상품 발견 — 상세 수집 시작")
 
-        # ── 2. 각 상품 수정 폼에서 모든 필드 추출 ──
+        # ── 2. 각 상품 수정 폼에서 필드 추출 + 처방비용 계산 ──
         for idx, seqno in enumerate(seqnos, 1):
-            detail_url = f"{CAFE_GOODS_WRITE_URL}?seqno={seqno}"
             row_data: dict = {"seqno": seqno, "구분": "C"}
             try:
-                driver.get(detail_url)
+                driver.get(f"{CAFE_GOODS_WRITE_URL}?seqno={seqno}")
                 _time.sleep(0.5)
                 soup2 = _BS(driver.page_source, "html.parser")
 
-                # 모든 named input/select/textarea 값 추출
-                for inp in soup2.find_all("input", {"name": True}):
-                    n = inp.get("name", "")
-                    t = inp.get("type", "text").lower()
-                    if not n or t in ("submit", "button", "image", "hidden"):
+                # bgcolor="D8E5F0" 라벨 → 다음 형제 td 값 (input/select/text)
+                for td_lbl in soup2.find_all("td", bgcolor="D8E5F0"):
+                    key = clean_text(td_lbl.get_text())
+                    if not key:
                         continue
-                    if t == "checkbox":
-                        val = "Y" if inp.get("checked") else "N"
-                    elif t == "radio":
-                        if not inp.get("checked"):
-                            continue
+                    td_val = td_lbl.find_next_sibling("td")
+                    if td_val is None or td_val.get("bgcolor", "").upper() == "D8E5F0":
+                        continue
+                    sel = td_val.find("select")
+                    inp = td_val.find("input")
+                    if sel:
+                        opt = sel.find("option", selected=True)
+                        val = clean_text(opt.get_text()) if opt else ""
+                    elif inp:
                         val = (inp.get("value") or "").strip()
                     else:
-                        val = (inp.get("value") or "").strip()
-                    row_data.setdefault(n, val)
+                        val = clean_text(td_val.get_text())
+                    if key and key not in row_data:
+                        row_data[key] = val
 
-                for sel in soup2.find_all("select", {"name": True}):
-                    n = sel.get("name", "")
-                    if not n:
-                        continue
-                    opt = sel.find("option", selected=True)
-                    val = clean_text(opt.get_text()) if opt else ""
-                    row_data.setdefault(n, val)
+                # 처방명 → 상품명 표준 열
+                if "처방명" in row_data:
+                    row_data["상품명"] = row_data["처방명"]
 
-                for ta in soup2.find_all("textarea", {"name": True}):
-                    n = ta.get("name", "")
-                    if not n:
-                        continue
-                    row_data.setdefault(n, clean_text(ta.get_text()))
+                # 처방비용(price) → 과세구분 매칭 후 공급가액/부가세 역산
+                price_raw = row_data.get("처방비용", "0") or "0"
+                try:
+                    price = int(_re.sub(r"[^\d]", "", str(price_raw)))
+                except ValueError:
+                    price = 0
 
-                # 상품명 표준 열로 보정
-                if "goods_name" in row_data and "상품명" not in row_data:
-                    row_data["상품명"] = row_data["goods_name"]
-
-                name = row_data.get("상품명", "") or seqno
-                log(f"  [카페][{idx}/{len(seqnos)}] {name} (seqno={seqno})")
+                cafe_name = row_data.get("상품명", "")
+                matched_key, ref_entry = _fmatch(cafe_name)
+                과세구분 = ref_entry.get("과세구분", "") if ref_entry else ""
+                if matched_key:
+                    log(f"  [카페][{idx}/{len(seqnos)}] {cafe_name} → [{matched_key}]({과세구분})")
+                else:
+                    log(f"  [카페][{idx}/{len(seqnos)}] {cafe_name} → 매칭 실패(과세구분=?)")
+                    과세구분 = "?"
+                row_data.update(_breakdown(price, 과세구분, ref_entry))
 
             except Exception as _e:
                 log(f"  [카페] seqno={seqno} 상세 조회 실패: {_e}")
@@ -7468,7 +7519,17 @@ def launch_gui():
 
                     shop_rows = _fetch_shop_product_all_details(_drv, log=_log_cb)
                     root.after(0, lambda: dlg_log_var.set(f"약속처방 {len(shop_rows)}개 완료 → 카페 상품 수집 중..."))
-                    cafe_rows = _fetch_cafe_product_all_details(_drv, log=_log_cb)
+                    # 약속처방 결과로 shop_map 구성 (카페 퍼지 매칭용)
+                    _shop_map_for_cafe = {
+                        r["상품명"]: {
+                            "공급가액": r.get("처방비용_공급가액") or 0,
+                            "부가세":   r.get("처방비용_부가세")   or 0,
+                            "면세금액": r.get("처방비용_면세금액") or 0,
+                            "과세구분": r.get("처방비용_과세구분") or "",
+                        }
+                        for r in shop_rows if r.get("상품명") and r.get("처방비용_과세구분")
+                    }
+                    cafe_rows = _fetch_cafe_product_all_details(_drv, shop_map=_shop_map_for_cafe, log=_log_cb)
 
                     rows = shop_rows + cafe_rows
                     if rows:
