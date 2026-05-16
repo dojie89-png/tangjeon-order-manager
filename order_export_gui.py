@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.43"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.49"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -4573,8 +4573,18 @@ _SHOP_PRODUCT_NAME_MAP: dict = {
 # 형식: "카페 상품명에 포함된 키워드": "약속처방 상품명에 포함된 키워드"
 # 카페 상품명에 키워드가 포함되면, 약속처방 캐시에서 대응 키워드를 포함한 항목을 우선 매칭
 _CAFE_TO_SHOP_NAME_MAP: dict = {
-    "낙산균": "프리바이오틱스 유산균",
-    # 매칭이 안 맞는 다른 카페 상품들도 발견되는 대로 여기에 추가
+    "낙산균": "프리바이오틱스 유산균",       # 카페 "낙산균 xxx" → 약속처방 "프리바이오틱스 유산균"
+    "프리바이오틱스": "낙산균 프리미엄",     # 카페 "프리바이오틱스" → 약속처방 "낙산균 프리미엄-S"
+    "경옥고 30환": "30환박스",               # 카페 "경옥고 30환" → 약속처방 "30환박스"
+    "경옥고 벌크": "150환",                  # 카페 "경옥고 벌크 150" → 약속처방 "150환"
+    "경옥고 스틱": "30포박스",               # 카페 "경옥고 스틱 30포" → 약속처방 "30포박스"
+}
+
+# 주문 상세의 상품명 → product_tax_map 검색 키워드 수동 매핑
+# C형 주문에서 자동 퍼지 매칭이 실패하는 경우에 적용
+_ORDER_PRODUCT_NAME_MAP: dict = {
+    "유산균": "프리바이오틱스",    # 카페 주문 "프리바이오틱스: 유산균" 에서 추출된 "유산균" → 프리바이오틱스 제품
+    "사향25방": "사향공진단",      # "사향25방" → 사향공진단 25방
 }
 
 
@@ -5102,18 +5112,15 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
                 # 상품명: 링크 텍스트
                 row_data["상품명"] = clean_text(a_tags[0].get_text()) or ""
 
-                # 링크가 있는 <td>를 기준으로 이전/다음 형제 셀에서 값 추출
-                # 목록 구조: 번호 | 상품명(링크) | 판매가 | 처방상태 | 활성 | 등록일 | 정렬(숫자나열) | ...
+                # 목록 구조: 번호 | 상품명(링크) | 판매가 | 처방상태 | 활성 | 등록일 | ...
+                # 처방상태/활성/가격은 상세 페이지에서 정확히 수집하므로 목록에서는 등록일(4번째 형제)만 추출
                 name_td = a_tags[0].find_parent("td")
                 if name_td:
-                    prev = name_td.find_previous_sibling("td")
-                    if prev:
-                        row_data["번호"] = clean_text(prev.get_text())
-                    next_cols = ["판매가", "처방상태", "활성", "등록일"]
-                    for col_name, sib in zip(next_cols, name_td.find_next_siblings("td")):
-                        val = clean_text(sib.get_text())
-                        if val and len(val) <= 30:  # 정렬용 긴 숫자 나열 제외
-                            row_data[col_name] = val
+                    sibs = name_td.find_next_siblings("td")
+                    if len(sibs) >= 4:
+                        val = clean_text(sibs[3].get_text())
+                        if val and len(val) <= 30:
+                            row_data["등록일"] = val
 
                 products.append(row_data)
 
@@ -5317,6 +5324,16 @@ def _fetch_cafe_product_all_details(driver, shop_map: dict = None, log=None) -> 
                         val = clean_text(td_val.get_text())
                     if key and key not in row_data:
                         row_data[key] = val
+
+                # 할인적용(N개이상) / 할인_금액 별도 추출
+                if "할인적용" in row_data:
+                    row_data["할인_N개이상"] = row_data.pop("할인적용")
+                # sale_price input: N개이상 주문시 할인 금액
+                sp_inp = soup2.find("input", {"name": "sale_price"})
+                if sp_inp:
+                    sp_val = (sp_inp.get("value") or "").strip()
+                    if sp_val:
+                        row_data["할인_금액"] = sp_val
 
                 # 처방명 → 상품명 표준 열
                 if "처방명" in row_data:
@@ -5618,20 +5635,34 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
                     else:
                         import difflib as _dl2
                         _n_c = re.sub(r"\s+", "", _n).lower()
+                        # ── 0단계: 수동 매핑 우선 ──
                         _bk, _bs = None, 0.0
-                        for _k in product_tax_map:
-                            _k_c = re.sub(r"\s+", "", _k).lower()
-                            if len(_n_c) >= 2 and len(_k_c) >= 2:
-                                if _n_c in _k_c or _k_c in _n_c:
-                                    _sc = 0.9
+                        for _okw, _tkw in _ORDER_PRODUCT_NAME_MAP.items():
+                            if re.sub(r"\s+", "", _okw).lower() in _n_c:
+                                _tkw_c = re.sub(r"\s+", "", _tkw).lower()
+                                for _k2 in product_tax_map:
+                                    if _tkw_c in re.sub(r"\s+", "", _k2).lower():
+                                        log(f"  수동 매핑: '{_n}' → '{_k2}'")
+                                        _bk, _bs = _k2, 1.0
+                                        break
+                                if _bk:
+                                    break
+                        # ── 1단계: 자동 퍼지 매칭 ──
+                        if not _bk:
+                            for _k in product_tax_map:
+                                _k_c = re.sub(r"\s+", "", _k).lower()
+                                if len(_n_c) >= 2 and len(_k_c) >= 2:
+                                    if _n_c in _k_c or _k_c in _n_c:
+                                        _sc = 0.9
+                                    else:
+                                        _sc = _dl2.SequenceMatcher(None, _n_c, _k_c).ratio()
                                 else:
-                                    _sc = _dl2.SequenceMatcher(None, _n_c, _k_c).ratio()
-                            else:
-                                _sc = 0.0
-                            if _sc > _bs:
-                                _bs, _bk = _sc, _k
+                                    _sc = 0.0
+                                if _sc > _bs:
+                                    _bs, _bk = _sc, _k
                         if _bk and _bs >= 0.55:
-                            log(f"  퍼지 매칭: '{_n}' → '{_bk}' (score={_bs:.2f})")
+                            if _bs < 1.0:
+                                log(f"  퍼지 매칭: '{_n}' → '{_bk}' (score={_bs:.2f})")
                             _hit = product_tax_map[_bk]
                             _fuzzy_lookup_cache[_n] = _bk
                         else:
@@ -5669,7 +5700,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         for _i in range(_max_prods):
             _pfx = f"상품{_i + 1}_"
             _qty_tax_col_names  += [f"{_pfx}공급가액금액", f"{_pfx}부가세금액", f"{_pfx}면세금액금액"]
-            _unit_tax_col_names += [f"{_pfx}공급가액", f"{_pfx}부가세", f"{_pfx}면세금액", f"{_pfx}과세구분"]
+            _unit_tax_col_names += [f"{_pfx}공급가액_단가", f"{_pfx}부가세_단가", f"{_pfx}면세금액_단가", f"{_pfx}과세구분"]
 
         for r in master_results:
             _tlist = r.get("_tax_list", [])
@@ -5686,10 +5717,10 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
                 _exempt_unit = _ti.get("면세금액", 0) or 0
 
                 # 단가 컬럼
-                r[f"{_pfx}공급가액"] = _supply_unit if _ti else ""
-                r[f"{_pfx}부가세"]   = _vat_unit    if _ti else ""
-                r[f"{_pfx}면세금액"] = _exempt_unit if _ti else ""
-                r[f"{_pfx}과세구분"] = _ti.get("과세구분", "")
+                r[f"{_pfx}공급가액_단가"] = _supply_unit if _ti else ""
+                r[f"{_pfx}부가세_단가"]   = _vat_unit    if _ti else ""
+                r[f"{_pfx}면세금액_단가"] = _exempt_unit if _ti else ""
+                r[f"{_pfx}과세구분"]      = _ti.get("과세구분", "")
 
                 # 수량 반영 금액 컬럼
                 if _ti and _qty > 0:
@@ -5710,32 +5741,31 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
             r["공급가액합계"] = _sum_supply if _sum_supply or _sum_vat else ""
             r["부가세합계"]   = _sum_vat    if _sum_supply or _sum_vat else ""
 
+            # 카페 주문에서 결제금액이 미기재인 경우 계산된 합계로 보완
+            if not r.get("결제금액_총액") and (_sum_supply or _sum_vat):
+                _computed_total = _sum_supply + _sum_vat
+                r["결제금액_총액"] = _computed_total
+                if not r.get("처방비용"):
+                    r["처방비용"] = _computed_total
+
         # 열 순서:
-        #   기본열의 "포인트" 바로 뒤  → 공급가액합계, 부가세합계
-        #   "주문상품" 바로 뒤        → 주문상품N / 주문상품N_수량
-        #   "주문링크" 바로 뒤        → 수량반영 금액 군 → 단가 군
-        _base = list(_SHOP_ORDER_EXCEL_COLS)
-        _sum_cols = ["공급가액합계", "부가세합계"]
-        try:
-            _pt_idx = _base.index("포인트") + 1
-            _base = _base[:_pt_idx] + _sum_cols + _base[_pt_idx:]
-        except ValueError:
-            _base = _base + _sum_cols
-        try:
-            _op_idx = _base.index("주문상품") + 1
-        except ValueError:
-            _op_idx = len(_base)
-        _base = _base[:_op_idx] + _order_prod_col_names + _base[_op_idx:]
-        # 주문링크 뒤에 수량반영 금액 군 → 단가 군 (주문링크가 마지막이면 그냥 뒤에 붙음)
-        try:
-            _lk_idx = _base.index("주문링크") + 1
-        except ValueError:
-            _lk_idx = len(_base)
+        #   주문번호~주문상품 → 결제금액군 → 주문상품N/수량 → 입금~주문링크 → 상품N_금액/단가
+        _payment_cols = ["결제금액_총액", "처방비용", "배송료", "포인트",
+                         "공급가액합계", "부가세합계", "결제방법"]
+        _payment_set  = set(_payment_cols)
+        _op_idx = (_SHOP_ORDER_EXCEL_COLS.index("주문상품")
+                   if "주문상품" in _SHOP_ORDER_EXCEL_COLS else len(_SHOP_ORDER_EXCEL_COLS) - 1)
+        _head_cols = [c for c in _SHOP_ORDER_EXCEL_COLS[:_op_idx + 1]
+                      if c not in _payment_set]          # 주문번호 ~ 주문상품
+        _tail_cols = [c for c in _SHOP_ORDER_EXCEL_COLS[_op_idx + 1:]
+                      if c not in _payment_set]          # 입금 ~ 주문링크
         _excel_all_cols = (
-            _base[:_lk_idx]
-            + _qty_tax_col_names
-            + _unit_tax_col_names
-            + _base[_lk_idx:]
+            _head_cols
+            + _payment_cols              # 결제금액_총액 ~ 결제방법 (주문상품 바로 뒤)
+            + _order_prod_col_names      # 주문상품1/수량, 주문상품2/수량, ...
+            + _tail_cols                 # 입금, 입금자명, ..., 주문링크
+            + _qty_tax_col_names         # 상품1_공급가액금액, 상품1_부가세금액, ... (맨 뒤)
+            + _unit_tax_col_names        # 상품1_공급가액_단가, ...
         )
 
         # --- 저장 ---
@@ -5748,7 +5778,37 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
                 for c in _excel_all_cols:
                     if c not in r:
                         r[c] = ""
-            df_excel = pd.DataFrame(master_results, columns=_excel_all_cols)
+
+            # 순번 열 맨 앞에 추가
+            _all_cols_with_seq = ["순번"] + _excel_all_cols
+            for _si, r in enumerate(master_results, 1):
+                r["순번"] = _si
+
+            df_excel = pd.DataFrame(master_results, columns=_all_cols_with_seq)
+
+            # 수량 "개" 제거 후 숫자 변환
+            _qty_cols = [c for c in df_excel.columns if c.endswith("_수량")]
+            for _qc in _qty_cols:
+                df_excel[_qc] = (
+                    df_excel[_qc].astype(str)
+                    .str.replace(r"개$", "", regex=True)
+                    .str.strip()
+                    .replace("", pd.NA)
+                    .pipe(pd.to_numeric, errors="coerce")
+                    .astype("Int64")
+                )
+
+            # 금액 컬럼 숫자 변환 (텍스트→숫자, 엑셀 초록삼각형 방지)
+            _numeric_str_cols = ["결제금액_총액", "처방비용", "배송료", "포인트",
+                                 "공급가액합계", "부가세합계"]
+            _numeric_val_cols = [c for c in df_excel.columns
+                                 if any(c.endswith(sfx) for sfx in
+                                        ("공급가액금액", "부가세금액", "면세금액금액",
+                                         "공급가액_단가", "부가세_단가", "면세금액_단가"))]
+            for _nc in _numeric_str_cols + _numeric_val_cols:
+                if _nc in df_excel.columns:
+                    df_excel[_nc] = pd.to_numeric(df_excel[_nc], errors="coerce").astype("Int64")
+
             excel_path = os.path.join(output_root, f"{run_ts}_약속처방_주문마스터.xlsx")
             df_excel.to_excel(excel_path, index=False)
             log(f"엑셀 저장: {excel_path} ({_max_prods}개 상품 열)")
@@ -7535,14 +7595,38 @@ def launch_gui():
                     if rows:
                         import pandas as _pd
                         df = _pd.DataFrame(rows)
-                        # 열 순서: 구분 → p_seq/seqno → 상품명 → 기타 → 처방비용_* → _오류
-                        _price_cols = [c for c in df.columns if c.startswith("처방비용_")]
-                        _err_cols   = [c for c in df.columns if c.startswith("_")]
-                        _front = [c for c in ["구분", "p_seq", "seqno", "상품명"] if c in df.columns]
-                        _mid   = [c for c in df.columns
-                                  if c not in _front and c not in _price_cols and c not in _err_cols]
-                        ordered = _front + _mid + _price_cols + _err_cols
-                        df = df[ordered]
+
+                        # ── 열 통합/정리 ──
+                        # 상품ID: p_seq(약속처방) + seqno(카페) → 단일 열
+                        df["상품ID"] = df.get("p_seq", _pd.Series(dtype=str)).fillna("").astype(str).replace("nan", "")
+                        if "seqno" in df.columns:
+                            mask = df["상품ID"].eq("")
+                            df.loc[mask, "상품ID"] = df.loc[mask, "seqno"].fillna("").astype(str).replace("nan", "")
+                        df["상품ID"] = df["상품ID"].replace("", _pd.NA)
+
+                        # 분류: 상품분류(약속처방) + 분류(카페) → 단일 열
+                        df["_분류merged"] = df.get("상품분류", _pd.Series(dtype=str)).fillna("").astype(str).replace("nan", "")
+                        if "분류" in df.columns:
+                            mask2 = df["_분류merged"].eq("")
+                            df.loc[mask2, "_분류merged"] = df.loc[mask2, "분류"].fillna("").astype(str).replace("nan", "")
+                        df["분류"] = df["_분류merged"].replace("", _pd.NA)
+                        df.drop(columns=["_분류merged"], inplace=True)
+
+                        # 불필요 열 제거
+                        _drop = {"p_seq", "seqno", "번호", "판매가", "처방명", "처방비용", "상품분류"}
+                        df.drop(columns=[c for c in _drop if c in df.columns], inplace=True)
+
+                        # ── 목표 열 순서 ──
+                        _fixed = ["구분", "상품명", "상품ID", "분류",
+                                  "처방상태", "활성",
+                                  "처방비용_총액", "처방비용_공급가액", "처방비용_부가세",
+                                  "처방비용_면세금액", "처방비용_과세구분",
+                                  "할인_N개이상", "할인_금액",
+                                  "등록일"]
+                        _err_cols  = [c for c in df.columns if c.startswith("_")]
+                        _front     = [c for c in _fixed if c in df.columns]
+                        _rest      = [c for c in df.columns if c not in _front and c not in _err_cols]
+                        df = df[_front + _rest + _err_cols]
                         df.to_excel(save_path, index=False)
                         _total = len(rows)
                         root.after(0, lambda: dlg_log_var.set(
