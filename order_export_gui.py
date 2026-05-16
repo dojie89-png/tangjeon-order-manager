@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.40"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.41"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -5099,26 +5099,21 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
 
                 row_data: dict = {"p_seq": p_seq}
 
-                # 부모 테이블의 첫 행에서 헤더 추출
-                parent_tbl = tr.find_parent("table")
-                headers: list = []
-                if parent_tbl:
-                    hdr_row = parent_tbl.find("tr")
-                    if hdr_row:
-                        headers = [clean_text(c.get_text())
-                                   for c in hdr_row.find_all(["th", "td"])]
+                # 상품명: 링크 텍스트
+                row_data["상품명"] = clean_text(a_tags[0].get_text()) or ""
 
-                # 현재 행의 td 값들을 헤더에 매핑
-                cells = tr.find_all("td")
-                for i, cell in enumerate(cells):
-                    col = headers[i] if i < len(headers) else f"열{i+1}"
-                    if not col or col == "p_seq":
-                        continue
-                    row_data[col] = clean_text(cell.get_text())
-
-                # 상품명이 없으면 링크 텍스트로 보충
-                if "상품명" not in row_data or not row_data["상품명"]:
-                    row_data["상품명"] = clean_text(a_tags[0].get_text()) or ""
+                # 링크가 있는 <td>를 기준으로 이전/다음 형제 셀에서 값 추출
+                # 목록 구조: 번호 | 상품명(링크) | 판매가 | 처방상태 | 활성 | 등록일 | 정렬(숫자나열) | ...
+                name_td = a_tags[0].find_parent("td")
+                if name_td:
+                    prev = name_td.find_previous_sibling("td")
+                    if prev:
+                        row_data["번호"] = clean_text(prev.get_text())
+                    next_cols = ["판매가", "처방상태", "활성", "등록일"]
+                    for col_name, sib in zip(next_cols, name_td.find_next_siblings("td")):
+                        val = clean_text(sib.get_text())
+                        if val and len(val) <= 30:  # 정렬용 긴 숫자 나열 제외
+                            row_data[col_name] = val
 
                 products.append(row_data)
 
