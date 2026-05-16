@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.41"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.42"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -5136,30 +5136,25 @@ def _fetch_shop_product_all_details(driver, log=None) -> list:
                 _time.sleep(0.5)
                 soup2 = _BS(driver.page_source, "html.parser")
 
-                # th/td 파싱: 상세 페이지에만 있는 필드 추가 (목록 값 덮어쓰지 않음)
-                for tr in soup2.find_all("tr"):
-                    cells = tr.find_all(["th", "td"])
-                    i = 0
-                    while i < len(cells):
-                        cell = cells[i]
-                        if cell.name == "th":
-                            key = clean_text(cell.get_text())
-                            if key and i + 1 < len(cells):
-                                val_cell = cells[i + 1]
-                                sel = val_cell.find("select")
-                                inp = val_cell.find("input")
-                                if sel:
-                                    opt = sel.find("option", selected=True)
-                                    val = clean_text(opt.get_text()) if opt else clean_text(sel.get_text())
-                                elif inp:
-                                    val = (inp.get("value") or "").strip()
-                                else:
-                                    val = clean_text(val_cell.get_text())
-                                if key and key not in row_data:
-                                    row_data[key] = val
-                                i += 2
-                                continue
-                        i += 1
+                # 상세 페이지 파싱: bgcolor="D8E5F0" 셀이 라벨
+                # 제외 항목: 이미지(이진), 구성(재료 select), 내용(HTML img), 처방비용(regex로 별도 추출)
+                _SKIP_KEYS = {"이미지", "구성", "내용", "처방비용"}
+                for td_lbl in soup2.find_all("td", bgcolor="D8E5F0"):
+                    key = clean_text(td_lbl.get_text())
+                    if not key or key in _SKIP_KEYS:
+                        continue
+                    td_val = td_lbl.find_next_sibling("td")
+                    if td_val is None or td_val.get("bgcolor", "").upper() == "D8E5F0":
+                        continue
+                    sel = td_val.find("select")
+                    if sel:
+                        opts = [clean_text(o.get_text()) for o in sel.find_all("option")
+                                if clean_text(o.get_text()) and "없습니다" not in o.get_text()]
+                        val = ", ".join(opts) if opts else ""
+                    else:
+                        val = clean_text(td_val.get_text())
+                    if key and key not in row_data:
+                        row_data[key] = val
 
                 # 처방비용 숫자 보정 (쉼표 제거 후 regex)
                 raw = _re.sub(r"<[^>]+>", " ", driver.page_source)
