@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.49"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.50"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -6107,7 +6107,7 @@ def launch_gui():
     print_printer_var = tk.StringVar(value="")
     auto_change_status_var = tk.BooleanVar(value=True)
     auto_cancel_status_var = tk.BooleanVar(value=True)
-    auto_dispensing_var = tk.BooleanVar(value=False)
+    auto_dispensing_var = tk.BooleanVar(value=True)
 
     # ── 2단 레이아웃: col0=파일저장/자동전환, col1=자동인쇄/PDF저장
     tab1.columnconfigure(0, weight=0)
