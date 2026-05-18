@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.52"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.53"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -5430,6 +5430,385 @@ def build_shop_order_cj_df(results: list) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=_SHOP_CJ_COLUMNS)
 
 
+def run_sp_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str = "",
+                        log_callback=None, progress_callback=None, cancel_check=None):
+    """약속처방 송장번호 입력: CJ 엑셀 → 배송준비 주문 매칭 → 송장 입력 + 배송중(3) 전환"""
+    def log(msg):
+        print(msg)
+        if log_callback:
+            log_callback(msg)
+
+    def update_progress(pct, msg):
+        if progress_callback:
+            progress_callback(pct, msg)
+
+    driver = None
+    try:
+        # 1. CJ 엑셀 읽기
+        update_progress(5, "파일 읽는 중...")
+        detail_df = pd.read_excel(detail_excel_path, header=0, dtype=str)
+
+        tracking_col = None
+        ordercode_col = None
+        for col in detail_df.columns:
+            col_c = clean_text(str(col))
+            if "운송장번호" in col_c:
+                tracking_col = col
+            if "고객주문번호" in col_c:
+                ordercode_col = col
+
+        if not tracking_col:
+            raise Exception(f"운송장번호 컬럼을 찾을 수 없어요.\n찾은 컬럼: {list(detail_df.columns)}")
+        if not ordercode_col:
+            raise Exception("고객주문번호 컬럼을 찾을 수 없어요. (약속처방은 주문번호 기준 매칭)")
+
+        detail_by_ordercode = {}
+        for _, row in detail_df.iterrows():
+            tracking_raw = str(row.get(tracking_col, "")).strip()
+            ordercode_raw = clean_text(str(row.get(ordercode_col, "")))
+            if tracking_raw in ("nan", "") or not ordercode_raw or ordercode_raw == "nan":
+                continue
+            tracking_clean = re.sub(r"[-\s]", "", tracking_raw).strip()
+            if tracking_clean:
+                for code in ordercode_raw.split("/"):
+                    code = code.strip()
+                    if code:
+                        detail_by_ordercode[code] = tracking_clean
+        log(f"CJ 파일: {len(detail_by_ordercode)}건 읽음 (주문번호 기준)")
+
+        if not detail_by_ordercode:
+            raise NoWorkFound("CJ 파일에서 매칭 가능한 주문이 없어요.")
+
+        filter_start_dt = parse_filter_datetime(start_date)
+        filter_end_dt   = parse_filter_datetime(end_date)
+        if filter_start_dt:
+            log(f"⏰ 시작 필터: {start_date}")
+        if filter_end_dt:
+            log(f"⏰ 종료 필터: {end_date}")
+
+        # 2. 로그인 + 약속처방 배송준비(2) 목록 수집
+        update_progress(10, "로그인 중...")
+        _opts = Options()
+        _opts.add_argument("--start-maximized")
+        driver = webdriver.Chrome(options=_opts)
+        login_driver(driver, ADMIN_ID, ADMIN_PW)
+
+        update_progress(15, "약속처방 주문 목록 수집 중...")
+
+        driver.get(SHOP_ORDER_LIST_URL)
+        time.sleep(0.8)
+        driver.execute_script(f"""
+            var f = document.form2 || document.forms[0];
+            if (!f) return;
+            f.s_date.value     = '{start_date}';
+            f.e_date.value     = '{end_date}';
+            f.search.value     = 'name';
+            f.s_string.value   = '';
+            f.order_ings.value = '2';
+        """)
+        driver.execute_script("(document.form2 || document.forms[0]).submit();")
+        time.sleep(1.2)
+
+        all_sp_orders = []
+        seen_order_nos = set()
+        page = 1
+        while page <= MAX_PAGE_SAFETY_LIMIT:
+            if cancel_check and cancel_check():
+                log("⛔ 취소됨")
+                break
+            html = driver.page_source
+            rows = _parse_shop_order_list_page(html)
+            if not rows:
+                log(f"페이지 {page}: 데이터 없음 → 수집 완료")
+                break
+            new_rows = [r for r in rows if r["주문번호"] not in seen_order_nos]
+            for r in new_rows:
+                seen_order_nos.add(r["주문번호"])
+            all_sp_orders.extend(new_rows)
+            log(f"페이지 {page}: {len(rows)}건 (신규 {len(new_rows)}건)")
+
+            soup_pg = BeautifulSoup(html, "html.parser")
+            next_link = soup_pg.find("a", href=lambda h: h and f"page={page+1}" in h)
+            if not next_link:
+                break
+            next_href = next_link["href"]
+            if not next_href.startswith("http"):
+                next_href = urljoin(f"{BASE_URL}/shop_order/", next_href)
+            driver.get(next_href)
+            time.sleep(0.8)
+            page += 1
+
+        log(f"약속처방 배송준비 {len(all_sp_orders)}건 수집")
+
+        # 날짜 필터
+        if filter_start_dt or filter_end_dt:
+            filtered = []
+            for r in all_sp_orders:
+                order_dt = parse_order_datetime_obj(r.get("주문일", ""))
+                if order_dt:
+                    order_date_only = order_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if filter_start_dt:
+                        start_date_only = filter_start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                        if order_date_only < start_date_only:
+                            continue
+                    if filter_end_dt:
+                        end_date_only = filter_end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                        if order_date_only > end_date_only:
+                            continue
+                filtered.append(r)
+            all_sp_orders = filtered
+            log(f"날짜 필터 후: {len(all_sp_orders)}건")
+
+        if not all_sp_orders:
+            raise NoWorkFound("배송준비 상태의 약속처방 주문이 없어요.")
+
+        # 3. 매칭 + 송장번호 입력 + 배송중 전환
+        success_count = 0
+        fail_count = 0
+        skip_count = 0
+
+        for i, order in enumerate(all_sp_orders):
+            if cancel_check and cancel_check():
+                log("⛔ 취소됨")
+                update_progress(0, "취소됨")
+                break
+
+            pct = 20 + int(75 * (i + 1) / len(all_sp_orders))
+            update_progress(pct, f"송장 입력 중... ({i+1}/{len(all_sp_orders)})")
+
+            order_no = order["주문번호"]
+            tracking = detail_by_ordercode.get(order_no)
+            if not tracking:
+                skip_count += 1
+                log(f"- 매칭 없음: {order_no} ({order.get('한의원명', '')})")
+                continue
+
+            try:
+                detail_href = order["detail_href"]
+                detail_url = detail_href if detail_href.startswith("http") else urljoin(f"{BASE_URL}/shop_order/", detail_href)
+                driver.get(detail_url)
+                time.sleep(1.0)
+
+                # 송장번호 필드 입력
+                inp = None
+                for field_name in ("deliveryno", "delivery_no"):
+                    try:
+                        inp = WebDriverWait(driver, 8).until(
+                            EC.presence_of_element_located((By.NAME, field_name))
+                        )
+                        break
+                    except Exception:
+                        pass
+                if not inp:
+                    raise Exception("송장번호 입력 필드를 찾을 수 없어요")
+                inp.clear()
+                inp.send_keys(tracking)
+
+                # 진행상태 → 배송중(3)
+                try:
+                    sel_el = driver.find_element(By.NAME, "order_ing")
+                    Select(sel_el).select_by_value("3")
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+
+                # 폼 제출
+                driver.execute_script(
+                    "if(typeof order_change==='function'){ order_change(); }"
+                    "else if(typeof delivery_insert==='function'){ delivery_insert(); }"
+                    "else{ document.forms[0].submit(); }"
+                )
+                time.sleep(1.5)
+
+                success_count += 1
+                log(f"✓ 발송처리: {order_no} {order.get('한의원명', '')} → 송장 {tracking}")
+
+            except Exception as e:
+                fail_count += 1
+                log(f"✗ 실패: {order_no} {order.get('한의원명', '')} → {e}")
+
+        update_progress(100, "완료")
+        log(f"\n완료: 발송처리 {success_count}건 / 매칭 없음 {skip_count}건 / 실패 {fail_count}건")
+
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def run_sp_complete_job(start_date: str = "", end_date: str = "",
+                        log_callback=None, progress_callback=None, cancel_check=None):
+    """약속처방 배송완료 전환: 배송중(3) 주문 CJ 추적 확인 → 완료(4) 전환"""
+    def log(msg):
+        print(msg)
+        if log_callback:
+            log_callback(msg)
+
+    def update_progress(pct, msg):
+        if progress_callback:
+            progress_callback(pct, msg)
+
+    driver = None
+    try:
+        filter_start_dt = parse_filter_datetime(start_date)
+        filter_end_dt   = parse_filter_datetime(end_date)
+        if filter_start_dt:
+            log(f"⏰ 시작 필터: {start_date}")
+        if filter_end_dt:
+            log(f"⏰ 종료 필터: {end_date}")
+
+        update_progress(5, "로그인 중...")
+        _opts = Options()
+        _opts.add_argument("--start-maximized")
+        driver = webdriver.Chrome(options=_opts)
+        login_driver(driver, ADMIN_ID, ADMIN_PW)
+
+        # 1. 배송중(3) 약속처방 목록 수집
+        update_progress(10, "약속처방 배송중 목록 수집 중...")
+
+        driver.get(SHOP_ORDER_LIST_URL)
+        time.sleep(0.8)
+        driver.execute_script(f"""
+            var f = document.form2 || document.forms[0];
+            if (!f) return;
+            f.s_date.value     = '{start_date}';
+            f.e_date.value     = '{end_date}';
+            f.search.value     = 'name';
+            f.s_string.value   = '';
+            f.order_ings.value = '3';
+        """)
+        driver.execute_script("(document.form2 || document.forms[0]).submit();")
+        time.sleep(1.2)
+
+        shipped_orders = []
+        seen_order_nos = set()
+        page = 1
+        while page <= MAX_PAGE_SAFETY_LIMIT:
+            if cancel_check and cancel_check():
+                log("⛔ 취소됨")
+                break
+            html = driver.page_source
+            rows = _parse_shop_order_list_page(html)
+            if not rows:
+                log(f"페이지 {page}: 데이터 없음 → 수집 완료")
+                break
+
+            for r in rows:
+                if r["주문번호"] in seen_order_nos:
+                    continue
+                seen_order_nos.add(r["주문번호"])
+
+                # 날짜 필터
+                if filter_start_dt or filter_end_dt:
+                    order_dt = parse_order_datetime_obj(r.get("주문일", ""))
+                    if order_dt:
+                        order_date_only = order_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                        if filter_start_dt:
+                            start_date_only = filter_start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                            if order_date_only < start_date_only:
+                                continue
+                        if filter_end_dt:
+                            end_date_only = filter_end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                            if order_date_only > end_date_only:
+                                continue
+
+                tracking = r.get("송장번호", "").strip()
+                if not tracking:
+                    continue
+                shipped_orders.append({
+                    "주문번호": r["주문번호"],
+                    "한의원명": r.get("한의원명", ""),
+                    "detail_href": r["detail_href"],
+                    "송장번호": tracking,
+                })
+
+            log(f"페이지 {page}: {len(rows)}건")
+
+            soup_pg = BeautifulSoup(html, "html.parser")
+            next_link = soup_pg.find("a", href=lambda h: h and f"page={page+1}" in h)
+            if not next_link:
+                break
+            next_href = next_link["href"]
+            if not next_href.startswith("http"):
+                next_href = urljoin(f"{BASE_URL}/shop_order/", next_href)
+            driver.get(next_href)
+            time.sleep(0.8)
+            page += 1
+
+        log(f"\n약속처방 배송중 {len(shipped_orders)}건 수집")
+
+        if not shipped_orders:
+            raise NoWorkFound("배송완료 전환 대상 약속처방 주문이 없어요.")
+
+        # 2. CJ 배송현황 확인 → 완료(4) 전환
+        success_count = 0
+        fail_count = 0
+        skip_count = 0
+
+        for i, order in enumerate(shipped_orders):
+            if cancel_check and cancel_check():
+                log("⛔ 취소됨")
+                update_progress(0, "취소됨")
+                break
+
+            pct = 20 + int(75 * (i + 1) / len(shipped_orders))
+            update_progress(pct, f"배송현황 확인 중... ({i+1}/{len(shipped_orders)})")
+
+            try:
+                tracking_url = f"https://trace.cjlogistics.com/next/tracking.html?wblNo={order['송장번호']}"
+                driver.get(tracking_url)
+                try:
+                    WebDriverWait(driver, 15).until(
+                        lambda d: len(d.find_element(By.ID, "statusDetail").text.strip()) > 0
+                    )
+                except Exception:
+                    time.sleep(3)
+
+                if "배송완료" in driver.page_source:
+                    detail_href = order["detail_href"]
+                    detail_url = detail_href if detail_href.startswith("http") else urljoin(f"{BASE_URL}/shop_order/", detail_href)
+                    driver.get(detail_url)
+                    time.sleep(1.0)
+
+                    try:
+                        sel_el = WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.NAME, "order_ing"))
+                        )
+                        Select(sel_el).select_by_value("4")
+                        time.sleep(0.3)
+                        driver.execute_script(
+                            "if(typeof order_change==='function'){ order_change(); }"
+                            "else{ document.forms[0].submit(); }"
+                        )
+                        time.sleep(1.5)
+                    except Exception as se:
+                        log(f"✗ 상태 전환 실패 ({order['주문번호']}): {se}")
+                        fail_count += 1
+                        continue
+
+                    success_count += 1
+                    log(f"✓ 완료 전환: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']})")
+                else:
+                    skip_count += 1
+                    log(f"- 배송중: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']})")
+
+            except Exception as e:
+                fail_count += 1
+                log(f"✗ 실패: {order['주문번호']} {order['한의원명']} → {e}")
+
+        update_progress(100, "완료")
+        log(f"\n완료: 전환 {success_count}건 / 배송중 {skip_count}건 / 실패 {fail_count}건")
+
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
 def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None):
     """약속처방 주문 목록 수집 + 상세 조회 + 파일 저장"""
     driver = None
@@ -7072,30 +7451,135 @@ def launch_gui():
 
     bk_ship_btn.config(command=on_bk_ship)
 
-    # ── 공유 상태창 + 진행바 (두 섹션 모두 여기 출력) ──
+    # ── 약속처방 송장번호 입력 ──
+    sp_delivery_lf = ttk.LabelFrame(tab2, text="약속처방 송장번호 입력", padding=(8, 4))
+    sp_delivery_lf.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    sp_delivery_lf.columnconfigure(0, weight=1)
+
+    sp_detail_path_var = tk.StringVar()
+    _sp_file_row = ttk.Frame(sp_delivery_lf)
+    _sp_file_row.grid(row=0, column=0, sticky="ew")
+    _sp_file_row.columnconfigure(0, weight=1)
+    sp_detail_entry = ttk.Entry(_sp_file_row, textvariable=sp_detail_path_var)
+    sp_detail_entry.grid(row=0, column=0, sticky="ew")
+
+    def sp_browse_detail():
+        paths = filedialog.askopenfilenames(
+            title="파일접수 내역 파일 선택",
+            filetypes=[("Excel files", "*.xlsx *.xls")]
+        )
+        if paths:
+            sp_detail_path_var.set(";".join(paths))
+
+    ttk.Button(_sp_file_row, text="찾아보기", command=sp_browse_detail).grid(row=0, column=1, sticky="w", padx=(4, 0))
+    ttk.Label(sp_delivery_lf,
+              text="※ 대한통운 파일접수 엑셀의 주문번호로 약속처방 주문을 매칭해 송장을 입력합니다.",
+              foreground="gray", font=("Malgun Gothic", 8)
+              ).grid(row=1, column=0, sticky="w", pady=(2, 4))
+
+    sp_d_action_frame = ttk.Frame(sp_delivery_lf)
+    sp_d_action_frame.grid(row=2, column=0, sticky="ew", pady=(0, 2))
+    sp_delivery_cancel_event = threading.Event()
+    sp_delivery_cancel_btn = ttk.Button(sp_d_action_frame, text="취소", state="disabled",
+                                        command=lambda: sp_delivery_cancel_event.set())
+    sp_delivery_cancel_btn.pack(side="right", padx=(4, 0))
+    sp_delivery_run_btn = ttk.Button(sp_d_action_frame, text="실행")
+    sp_delivery_run_btn.pack(side="right")
+
+    def on_sp_delivery_run():
+        if _global_running.is_set():
+            messagebox.showwarning("실행 중", "다른 탭이 현재 실행 중입니다.\n완료 후 다시 시도해주세요.")
+            return
+        if not ensure_admin_credentials(root):
+            return
+        sp_paths = [p.strip() for p in sp_detail_path_var.get().split(";") if p.strip()]
+        if not sp_paths:
+            messagebox.showerror("입력 오류", "파일접수 내역 파일을 선택해주세요.")
+            return
+        for path in sp_paths:
+            if not os.path.exists(path):
+                messagebox.showerror("파일 오류", f"파일을 찾을 수 없어요:\n{path}")
+                return
+        try:
+            start_date = normalize_date_input(" ".join(filter(None, [_ph_get(d_start_date_entry), _ph_get(d_start_time_entry)])))
+            end_date   = normalize_date_input(" ".join(filter(None, [_ph_get(d_end_date_entry), _ph_get(d_end_time_entry)])))
+        except ValueError as e:
+            messagebox.showerror("입력 오류", str(e))
+            return
+
+        _global_running.set()
+        sp_delivery_cancel_event.clear()
+        sp_delivery_run_btn.config(state="disabled")
+        sp_delivery_cancel_btn.config(state="normal")
+        delivery_progress_var.set(0)
+        delivery_status_label.config(text="실행 중...", foreground="red")
+        log_text.config(state="normal")
+        log_text.delete("1.0", tk.END)
+        log_text.config(state="disabled")
+
+        def worker():
+            try:
+                for sp_path in sp_paths:
+                    if sp_delivery_cancel_event.is_set():
+                        break
+                    append_log(f"\n=== 파일 처리 중: {os.path.basename(sp_path)} ===")
+                    run_sp_delivery_job(
+                        sp_path,
+                        start_date=start_date,
+                        end_date=end_date,
+                        log_callback=append_log,
+                        progress_callback=delivery_gui_progress,
+                        cancel_check=sp_delivery_cancel_event.is_set,
+                    )
+                if sp_delivery_cancel_event.is_set():
+                    root.after(0, lambda: messagebox.showinfo("취소", "작업이 취소됐어요."))
+                else:
+                    root.after(0, lambda: messagebox.showinfo("완료", "약속처방 송장 입력이 완료됐어요."))
+            except Exception as e:
+                err_msg = str(e)
+                if isinstance(e, NoWorkFound):
+                    root.after(0, lambda m=err_msg: messagebox.showinfo("조회 결과 없음", m))
+                    root.after(0, lambda: delivery_status_label.config(text="처리할 대상 없음", foreground="gray"))
+                    root.after(0, lambda: delivery_progress_var.set(100))
+                elif is_user_cancel_message(err_msg):
+                    root.after(0, lambda: messagebox.showinfo("작업 취소", "요청하신 작업을 중단했어요."))
+                    root.after(0, lambda: delivery_status_label.config(text="취소됨", foreground="gray"))
+                else:
+                    root.after(0, lambda m=err_msg: messagebox.showerror("오류", m))
+                    root.after(0, lambda: delivery_status_label.config(text="오류 발생", foreground="red"))
+            finally:
+                _global_running.clear()
+                root.after(0, lambda: sp_delivery_run_btn.config(state="normal"))
+                root.after(0, lambda: sp_delivery_cancel_btn.config(state="disabled"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    sp_delivery_run_btn.config(command=on_sp_delivery_run)
+
+    # ── 공유 상태창 + 진행바 (세 섹션 모두 여기 출력) ──
     delivery_status_label = ttk.Label(tab2, text="대기 중", foreground="blue")
-    delivery_status_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 2))
+    delivery_status_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 2))
 
     delivery_progress_var = tk.IntVar(value=0)
     delivery_progress_bar = ttk.Progressbar(
         tab2, orient="horizontal", length=300,
         mode="determinate", maximum=100, variable=delivery_progress_var
     )
-    delivery_progress_bar.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+    delivery_progress_bar.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
     # ── 로그창 ──
     log_text = tk.Text(tab2, height=7, width=50, state="disabled", font=("Malgun Gothic", 9))
-    log_text.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=(4, 4))
+    log_text.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(4, 4))
 
     log_scroll = ttk.Scrollbar(tab2, orient="vertical", command=log_text.yview)
-    log_scroll.grid(row=5, column=2, sticky="ns")
+    log_scroll.grid(row=6, column=2, sticky="ns")
     log_text.config(yscrollcommand=log_scroll.set)
 
     def _log_scroll_wheel(event):
         log_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
     log_text.bind("<MouseWheel>", _log_scroll_wheel)
-    tab2.rowconfigure(5, weight=1)
+    tab2.rowconfigure(6, weight=1)
 
     # ===== 탭 3: 배송완료 전환 =====
     tab3 = ttk.Frame(notebook, padding=12)
@@ -7177,8 +7661,10 @@ def launch_gui():
     ttk.Button(c_date_btn_frame, text="작년",   command=c_set_last_year,  width=_bw).grid(row=1, column=2, sticky="ew", padx=_px)
     ttk.Button(c_date_btn_frame, text="초기화", command=c_clear_dates,    width=_bw).grid(row=0, column=3, rowspan=2, sticky="nsew")
 
-    c_action_frame = ttk.Frame(tab3)
-    c_action_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+    c_tangjeon_lf = ttk.LabelFrame(tab3, text="탕전주문 배송완료 전환", padding=(8, 4))
+    c_tangjeon_lf.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    c_action_frame = ttk.Frame(c_tangjeon_lf)
+    c_action_frame.pack(fill="x")
     c_cancel_event = threading.Event()
     c_cancel_btn = ttk.Button(c_action_frame, text="취소", state="disabled",
                               command=lambda: c_cancel_event.set())
@@ -7186,21 +7672,33 @@ def launch_gui():
     c_run_btn_outer = ttk.Button(c_action_frame, text="실행")
     c_run_btn_outer.pack(side="right")
 
+    # ── 약속처방 배송완료 전환 ──
+    sp_complete_lf = ttk.LabelFrame(tab3, text="약속처방 배송완료 전환", padding=(8, 4))
+    sp_complete_lf.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    sp_c_action_frame = ttk.Frame(sp_complete_lf)
+    sp_c_action_frame.pack(fill="x")
+    sp_complete_cancel_event = threading.Event()
+    sp_complete_cancel_btn = ttk.Button(sp_c_action_frame, text="취소", state="disabled",
+                                        command=lambda: sp_complete_cancel_event.set())
+    sp_complete_cancel_btn.pack(side="right", padx=(4, 0))
+    sp_complete_run_btn = ttk.Button(sp_c_action_frame, text="실행")
+    sp_complete_run_btn.pack(side="right")
+
     c_status_label = ttk.Label(tab3, text="대기 중", foreground="blue")
-    c_status_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 4))
+    c_status_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 4))
 
     c_progress_var = tk.IntVar(value=0)
     c_progress_bar = ttk.Progressbar(
         tab3, orient="horizontal", length=380,
         mode="determinate", maximum=100, variable=c_progress_var
     )
-    c_progress_bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+    c_progress_bar.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 8))
 
     c_log_text = tk.Text(tab3, height=14, width=50, state="disabled", font=("Malgun Gothic", 9))
-    c_log_text.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
+    c_log_text.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
 
     c_log_scroll = ttk.Scrollbar(tab3, orient="vertical", command=c_log_text.yview)
-    c_log_scroll.grid(row=4, column=2, sticky="ns")
+    c_log_scroll.grid(row=5, column=2, sticky="ns")
     c_log_text.config(yscrollcommand=c_log_scroll.set)
 
     # disabled 상태에서도 마우스 휠 스크롤 가능하도록 바인딩
@@ -7281,6 +7779,64 @@ def launch_gui():
         threading.Thread(target=worker, daemon=True).start()
 
     c_run_btn_outer.config(command=on_complete_run)
+
+    def on_sp_complete_run():
+        if _global_running.is_set():
+            messagebox.showwarning("실행 중", "다른 탭이 현재 실행 중입니다.\n완료 후 다시 시도해주세요.")
+            return
+        if not ensure_admin_credentials(root):
+            return
+        try:
+            start_date = normalize_date_input(" ".join(filter(None, [_ph_get(c_start_date_entry), _ph_get(c_start_time_entry)])))
+            end_date   = normalize_date_input(" ".join(filter(None, [_ph_get(c_end_date_entry), _ph_get(c_end_time_entry)])))
+        except ValueError as e:
+            messagebox.showerror("입력 오류", str(e))
+            return
+
+        _global_running.set()
+        sp_complete_cancel_event.clear()
+        sp_complete_run_btn.config(state="disabled")
+        sp_complete_cancel_btn.config(state="normal")
+        c_progress_var.set(0)
+        c_status_label.config(text="실행 중...", foreground="red")
+        c_log_text.config(state="normal")
+        c_log_text.delete("1.0", tk.END)
+        c_log_text.config(state="disabled")
+
+        def worker():
+            try:
+                run_sp_complete_job(
+                    start_date=start_date,
+                    end_date=end_date,
+                    log_callback=c_append_log,
+                    progress_callback=c_gui_progress,
+                    cancel_check=sp_complete_cancel_event.is_set,
+                )
+                if sp_complete_cancel_event.is_set():
+                    root.after(0, lambda: messagebox.showinfo("취소", "작업이 취소됐어요."))
+                else:
+                    root.after(0, lambda: messagebox.showinfo("완료", "약속처방 배송완료 전환이 완료됐어요."))
+            except Exception as e:
+                err_msg = str(e)
+                if isinstance(e, NoWorkFound):
+                    root.after(0, lambda m=err_msg: messagebox.showinfo("조회 결과 없음", m))
+                    root.after(0, lambda: c_status_label.config(text="전환 대상 없음", foreground="gray"))
+                    root.after(0, lambda: c_progress_var.set(100))
+                elif is_user_cancel_message(err_msg):
+                    root.after(0, lambda: messagebox.showinfo("작업 취소", "요청하신 작업을 중단했어요."))
+                    root.after(0, lambda: c_status_label.config(text="취소됨", foreground="gray"))
+                else:
+                    root.after(0, lambda m=err_msg: messagebox.showerror("오류", m))
+                    root.after(0, lambda: c_status_label.config(text="오류 발생", foreground="red"))
+            finally:
+                _global_running.clear()
+                root.after(0, lambda: sp_complete_run_btn.config(state="normal"))
+                root.after(0, lambda: sp_complete_cancel_btn.config(state="disabled"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    sp_complete_run_btn.config(command=on_sp_complete_run)
+    tab3.rowconfigure(5, weight=1)
     tab3.columnconfigure(0, weight=1)
 
     # ===== 탭 4: 약속처방 주문관리 =====
