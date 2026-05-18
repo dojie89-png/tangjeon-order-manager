@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.50"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.51"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1739,10 +1739,14 @@ def export_label_excel(xlsx_path: str):
 
     df['용량'] = df['팩수'].astype(str) + '팩 / ' + df['파우치용량'].astype(str)
 
-    # 벌크여부: 한의원으로 택배 → "벌크", 나머지 → ""
+    # 벌크여부: 고래한방 + 한의원으로 택배 → "벌크", 나머지 → ""
     if '배송구분' in df.columns:
-        df['벌크여부'] = df['배송구분'].apply(
-            lambda v: "벌크" if clean_text(str(v or '')) == "한의원으로 택배" else ""
+        df['벌크여부'] = df.apply(
+            lambda row: "벌크"
+            if (clean_text(str(row.get('배송구분', '') or '')) == "한의원으로 택배"
+                and "고래" in clean_text(str(row.get('한의원_구분', '') or '')))
+            else "",
+            axis=1,
         )
     else:
         df['벌크여부'] = ''
