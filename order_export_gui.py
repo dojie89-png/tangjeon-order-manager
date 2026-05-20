@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.54"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.55"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1968,6 +1968,19 @@ _CJ_COLUMNS = [
 
 def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
     """대한통운 파일 업로드 양식 생성 (실제 업로드 양식 기준, A-Q 17컬럼)"""
+    # 주문코드 기준 중복 제거 (같은 주문이 두 번 수집된 경우 방지)
+    _seen_codes: set = set()
+    _deduped: list = []
+    for _r in master_results:
+        _code = clean_text(_r.get("주문코드", ""))
+        if _code and _code in _seen_codes:
+            print(f"[CJ중복제거] 주문코드 중복 제거: {_code}")
+            continue
+        if _code:
+            _seen_codes.add(_code)
+        _deduped.append(_r)
+    master_results = _deduped
+
     dosage_file_map = {job["ordercode"]: job.get("dosage_file_name", "") for job in pdf_jobs}
     dosage_text_map = {job["ordercode"]: job.get("dosage_text_only", "") for job in pdf_jobs}
 
