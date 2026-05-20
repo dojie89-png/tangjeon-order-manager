@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.53"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.54"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -693,6 +693,23 @@ def is_inpatient_dispense(hospital_folder_name: str, dispensing_note: str) -> bo
 
 # ---------- 벌크 판정 ----------
 BULK_MAX_PACKS = 30  # 팩수 미만이면 벌크 (30개 이상은 별도 박스 포장)
+
+def get_box_capacity(clinic: str, box_type: str) -> int | None:
+    """박스 유형·한의원 기준 박스당 최대 포수. None이면 분할 안 함.
+    고래한방은 항상 전용박스 용량 적용 (오창 포함, 박스포장 무시).
+    """
+    c = clean_text(str(clinic or ""))
+    b = clean_text(str(box_type or ""))
+    if "고래" in c:
+        if "관저" in c or "판암" in c:
+            return 40
+        return 30  # 세종, 오창 등
+    if "고급박스2" in b or "고급 박스 2" in b:
+        return 70
+    if "고급박스" in b:  # 고급박스1 또는 "고급박스"만 적힌 경우
+        return 30
+    return None  # 박스포장 없거나 인식 불가 → 분할 안 함
+
 
 def is_bulk_delivery(delivery_type: str, pack_count,
                      hospital_name: str = "", combined_address: str = "") -> bool:
@@ -1754,11 +1771,35 @@ def export_label_excel(xlsx_path: str):
     else:
         df['벌크여부'] = ''
 
-    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부']
+    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장']
     label_df = df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
     if '팩수' in label_df.columns:
         label_df['팩수'] = pd.to_numeric(label_df['팩수'], errors='coerce')
+
+    # ── 박스 분할: 팩수가 박스 용량 초과 시 라벨 복수 생성 ──
+    import math as _math
+    _split_rows = []
+    for _, _row in label_df.iterrows():
+        _clinic   = str(_row.get('한의원_구분', '') or '')
+        _box_type = str(_row.get('박스포장', '') or '')
+        _packs    = _row.get('팩수', None)
+        _cap      = get_box_capacity(_clinic, _box_type)
+        try:
+            _packs_int = int(_packs)
+        except (ValueError, TypeError):
+            _packs_int = 0
+        if _cap and _packs_int > _cap:
+            _n = _math.ceil(_packs_int / _cap)
+            for _i in range(1, _n + 1):
+                _d = _row.to_dict()
+                _d['박스번호'] = f'{_i}/{_n}'
+                _split_rows.append(_d)
+        else:
+            _d = _row.to_dict()
+            _d['박스번호'] = ''
+            _split_rows.append(_d)
+    label_df = pd.DataFrame(_split_rows).reset_index(drop=True)
 
     # 처방명에서 괄호 내용 분리: "오적산(소아)" → 처방명="오적산", 처방비고="소아"
     def _split_pres(v):
@@ -1809,24 +1850,21 @@ def export_label_excel(xlsx_path: str):
             return f'[{s}]'
         label_df['처방명'] = label_df['처방명'].apply(_wrap_pres)
 
-    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부
+    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장
     cols_order = list(label_df.columns)
-    for col in ['처방비고', '벌크여부']:
+    for col in ['처방비고', '벌크여부', '박스번호', '박스포장']:
         if col in cols_order:
             cols_order.remove(col)
     if '라벨코드' in cols_order:
         idx = cols_order.index('라벨코드')
-        if '처방비고' in label_df.columns:
-            cols_order.insert(idx + 1, '처방비고')
-            if '벌크여부' in label_df.columns:
-                cols_order.insert(idx + 2, '벌크여부')
-        elif '벌크여부' in label_df.columns:
-            cols_order.insert(idx + 1, '벌크여부')
+        for _tail in ['처방비고', '벌크여부', '박스번호', '박스포장']:
+            if _tail in label_df.columns:
+                idx += 1
+                cols_order.insert(idx, _tail)
     else:
-        # 라벨코드 없으면 처방비고 뒤에 벌크여부
-        if '처방비고' in label_df.columns and '벌크여부' in label_df.columns:
-            cols_order.append('처방비고')
-            cols_order.append('벌크여부')
+        for _tail in ['처방비고', '벌크여부', '박스번호', '박스포장']:
+            if _tail in label_df.columns:
+                cols_order.append(_tail)
     label_df = label_df[cols_order]
 
     # 타임스탬프(YYYYMMDD_HHMMSS) 추출 → "YYYYMMDD_HHMMSS_탕전 라벨 인쇄용.xlsx"
