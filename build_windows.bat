@@ -1,22 +1,23 @@
 @echo off
+chcp 65001 > nul
 setlocal
 
 cd /d "%~dp0"
 
-:: Python 3.11 또는 3.12 사용 (3.14는 PyInstaller 미지원)
-set PYVER=-3.11
+:: Try py -3.12 first, then py -3.11, then fallback to python
+set PYVER=-3.12
 py %PYVER% --version >nul 2>&1
 if errorlevel 1 (
-    set PYVER=-3.12
+    set PYVER=-3.11
     py %PYVER% --version >nul 2>&1
     if errorlevel 1 (
-        echo [오류] Python 3.11 또는 3.12가 설치되어 있지 않습니다.
-        echo https://www.python.org/downloads/release/python-3119/ 에서 설치 후 다시 실행하세요.
+        echo [Error] Python 3.11 or 3.12 not found. Please install from:
+        echo https://www.python.org/downloads/release/python-31210/
         pause
         exit /b 1
     )
 )
-echo [사용 Python 버전]
+echo [Python version]
 py %PYVER% --version
 
 echo [1/3] Installing dependencies...
