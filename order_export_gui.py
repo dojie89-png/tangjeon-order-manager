@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.56"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.57"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -281,7 +281,7 @@ def normalize_date_input(value: str) -> str:
 
 
 def td_text_without_form_controls(td) -> str:
-    td_copy = BeautifulSoup(str(td), "lxml")
+    td_copy = BeautifulSoup(str(td), "html.parser")
     for tag in td_copy.find_all(["input", "select", "option", "script", "style", "textarea"]):
         tag.decompose()
     text = td_copy.get_text(" ", strip=True)
@@ -977,7 +977,7 @@ def login_driver(driver, admin_id: str, admin_pw: str):
 
 # ---------- 주문마스터 ----------
 def parse_detail_html(html: str, detail_url: str = "", collect_index: int = 0, page_no: int = 1) -> dict:
-    soup = BeautifulSoup(html, "lxml")
+    soup = BeautifulSoup(html, "html.parser")
     trs = soup.find_all("tr")
     basic = {}
     sender = {}
@@ -1078,7 +1078,7 @@ def parse_detail_html(html: str, detail_url: str = "", collect_index: int = 0, p
 
 # ---------- 주문내역서 ----------
 def parse_decoction_html(html_text: str, source_row: dict, decoction_url: str) -> dict:
-    soup = BeautifulSoup(html_text, "lxml")
+    soup = BeautifulSoup(html_text, "html.parser")
     body_text = clean_text(soup.get_text(" ", strip=True))
     main_table = find_main_decoction_table(soup)
     if not main_table:
@@ -1256,7 +1256,7 @@ def parse_decoction_html(html_text: str, source_row: dict, decoction_url: str) -
 def collect_detail_links_on_current_page(driver, wait):
     """목록 페이지에서 주문 상세 링크 수집. row_date도 함께 추출해 시간 필터 사전 적용 가능."""
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-    soup = BeautifulSoup(driver.page_source, "lxml")
+    soup = BeautifulSoup(driver.page_source, "html.parser")
     detail_rows = []
     seen_hrefs = set()
     for row in soup.find_all("tr"):
@@ -1577,7 +1577,7 @@ def fetch_order_snapshot(driver, href: str, wait_sec: float = 1.2) -> dict:
     driver.get(href)
     time.sleep(wait_sec)
     html_text = driver.page_source
-    soup = BeautifulSoup(html_text, "lxml")
+    soup = BeautifulSoup(html_text, "html.parser")
     return {
         "html_text": html_text,
         "status_text": get_selected_option_text(soup, "order_ing"),
@@ -1614,7 +1614,7 @@ def change_order_status(driver, html_text: str, href: str, order_ing_value: str)
         f"{ORDER_CHANGE_BASE_URL}"
         f"?seqno={seqno}&page=&s_date=&e_date=&search=&s_string=&order_ings="
     )
-    soup = BeautifulSoup(html_text, "lxml")
+    soup = BeautifulSoup(html_text, "html.parser")
     cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
     payload = {
         "ordercode": get_input_value(soup, "ordercode"),
@@ -1633,7 +1633,7 @@ def change_order_status(driver, html_text: str, href: str, order_ing_value: str)
 
 # ---------- 송장번호 입력 ----------
 def insert_delivery_no(driver, html_text: str, href: str, delivery_no: str) -> None:
-    soup = BeautifulSoup(html_text, "lxml")
+    soup = BeautifulSoup(html_text, "html.parser")
     seqno = extract_seqno_from_detail_url(href)
     insert_url = (
         f"{DELIVERY_INSERT_BASE_URL}"
@@ -3926,7 +3926,7 @@ def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None
             driver.get(list_url)
             time.sleep(2)
 
-            soup = BeautifulSoup(driver.page_source, "lxml")
+            soup = BeautifulSoup(driver.page_source, "html.parser")
             rows = soup.find_all("tr")
             found_on_page = 0
 
