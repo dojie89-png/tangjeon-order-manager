@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.55"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.56"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -697,6 +697,7 @@ BULK_MAX_PACKS = 30  # 팩수 미만이면 벌크 (30개 이상은 별도 박스
 def get_box_capacity(clinic: str, box_type: str) -> int | None:
     """박스 유형·한의원 기준 박스당 최대 포수. None이면 분할 안 함.
     고래한방은 항상 전용박스 용량 적용 (오창 포함, 박스포장 무시).
+    본가한의원은 박스포장 무관, 항상 30포 단위로 분할.
     """
     c = clean_text(str(clinic or ""))
     b = clean_text(str(box_type or ""))
@@ -704,6 +705,8 @@ def get_box_capacity(clinic: str, box_type: str) -> int | None:
         if "관저" in c or "판암" in c:
             return 40
         return 30  # 세종, 오창 등
+    if "본가" in c:
+        return 30  # 본가한의원: 박스포장 무관 30포 단위
     if "고급박스2" in b or "고급 박스 2" in b:
         return 70
     if "고급박스" in b:  # 고급박스1 또는 "고급박스"만 적힌 경우
