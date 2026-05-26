@@ -4,18 +4,13 @@ setlocal
 
 cd /d "%~dp0"
 
-:: Try py -3.12 first, then py -3.11, then fallback to python
-set PYVER=-3.12
+:: Use Python 3.14 for local run/build consistency.
+set PYVER=-3.14
 py %PYVER% --version >nul 2>&1
 if errorlevel 1 (
-    set PYVER=-3.11
-    py %PYVER% --version >nul 2>&1
-    if errorlevel 1 (
-        echo [Error] Python 3.11 or 3.12 not found. Please install from:
-        echo https://www.python.org/downloads/release/python-31210/
-        pause
-        exit /b 1
-    )
+    echo [Error] Python 3.14 not found. Please install Python 3.14 or check py launcher.
+    pause
+    exit /b 1
 )
 echo [Python version]
 py %PYVER% --version

@@ -4,16 +4,12 @@ setlocal
 
 cd /d "%~dp0"
 
-set PYVER=-3.12
+set PYVER=-3.14
 py %PYVER% --version >nul 2>&1
 if errorlevel 1 (
-    set PYVER=-3.11
-    py %PYVER% --version >nul 2>&1
-    if errorlevel 1 (
-        echo [Error] Python 3.11 or 3.12 not found.
-        pause
-        exit /b 1
-    )
+    echo [Error] Python 3.14 not found. Please install Python 3.14 or check py launcher.
+    pause
+    exit /b 1
 )
 
 echo [Python]
