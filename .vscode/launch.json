@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "탕전 주문 관리 실행 (Python 3.12)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\order_export_gui.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${env:LOCALAPPDATA}\\Programs\\Python\\Python312\\python.exe"
+    }
+  ]
+}
