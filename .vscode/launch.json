@@ -8,6 +8,7 @@
       "program": "${workspaceFolder}\\order_export_gui.py",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
+      "preLaunchTask": "의존성 설치 (Python 3.12)",
       "python": "${env:LOCALAPPDATA}\\Programs\\Python\\Python312\\python.exe"
     }
   ]
