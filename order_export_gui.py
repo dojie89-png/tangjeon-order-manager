@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 
 
-APP_VERSION = "13.57"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.58"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1774,7 +1774,7 @@ def export_label_excel(xlsx_path: str):
     else:
         df['벌크여부'] = ''
 
-    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장']
+    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장']
     label_df = df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
     if '팩수' in label_df.columns:
@@ -1853,19 +1853,19 @@ def export_label_excel(xlsx_path: str):
             return f'[{s}]'
         label_df['처방명'] = label_df['처방명'].apply(_wrap_pres)
 
-    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장
+    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장
     cols_order = list(label_df.columns)
-    for col in ['처방비고', '벌크여부', '박스번호', '박스포장']:
+    for col in ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장']:
         if col in cols_order:
             cols_order.remove(col)
     if '라벨코드' in cols_order:
         idx = cols_order.index('라벨코드')
-        for _tail in ['처방비고', '벌크여부', '박스번호', '박스포장']:
+        for _tail in ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장']:
             if _tail in label_df.columns:
                 idx += 1
                 cols_order.insert(idx, _tail)
     else:
-        for _tail in ['처방비고', '벌크여부', '박스번호', '박스포장']:
+        for _tail in ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장']:
             if _tail in label_df.columns:
                 cols_order.append(_tail)
     label_df = label_df[cols_order]
