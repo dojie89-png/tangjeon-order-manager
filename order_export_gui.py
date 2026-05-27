@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.61"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.62"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -2032,7 +2032,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         return re.sub(r"[^0-9]", "", str(val)).strip()
 
     _FORCE_DOSAGE_KW = {"약손", "본가"}          # 배송방식 무관, 항상 복용법 첨부
-    _FORCE_DOSAGE_KW_DIRECT = {"판암"}           # 직배송(환자택배)일 때만 복용법 첨부
+    _FORCE_DOSAGE_KW_DIRECT = {"판암", "관저"}   # 직배송(환자택배)일 때만 복용법 첨부
 
     def is_yakson(row) -> bool:
         """복용법 강제 포함 병원 여부 판정.
