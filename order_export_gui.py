@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.60"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.61"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -3108,8 +3108,13 @@ def run_job(settings: dict, progress_callback=None):
                     return (-ts, idx)   # dt 내림차순, 동률은 idx 오름차순(작은=최신 앞)
             print_queue.sort(key=_print_sort_key)
             # ── 2단계: 한의원별 묶기 (옵션) — stable sort이므로 날짜순 유지
+            # 고래한방 지점은 직배송(0) → 벌크(1) 순으로 추가 정렬
             if settings.get("print_by_hospital"):
-                print_queue.sort(key=lambda x: x["hospital"])
+                def _hospital_sort_key(p):
+                    h = p["hospital"]
+                    gorae_bulk = 1 if ("고래" in h and p.get("bulk")) else 0
+                    return (h, gorae_bulk)
+                print_queue.sort(key=_hospital_sort_key)
             # ── 3단계: 입원(입금대기) 건 맨 마지막 (옵션) — 입원이거나 입금대기인 건 후순위
             if settings.get("print_inpatient_last"):
                 normal_q = [p for p in print_queue
