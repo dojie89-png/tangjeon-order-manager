@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.64"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.65"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -2655,14 +2655,19 @@ def run_job(settings: dict, progress_callback=None):
 
                     # 정상 주문 → 조제중 자동 전환 예약 (입원·취소 제외)
                     elif settings.get("auto_dispensing_status") and not inpatient:
-                        pending_status_changes.append({
-                            "kind": "dispensing",
-                            "href": href,
-                            "ordercode": ordercode,
-                            "target_status": "3",
-                            "label": "조제중",
-                        })
-                        print(f"    -> 조제중 전환 예약: {ordercode}")
+                        _skip_for_dispensing = {"발송", "예약발송", "완료", "환불취소"}
+                        _existing_trk = normalize_tracking_no(master_data.get("송장번호", ""))
+                        if status in _skip_for_dispensing or _existing_trk:
+                            print(f"    -> 조제중 전환 스킵 (상태={status}, 송장={_existing_trk or '-'}): {ordercode}")
+                        else:
+                            pending_status_changes.append({
+                                "kind": "dispensing",
+                                "href": href,
+                                "ordercode": ordercode,
+                                "target_status": "3",
+                                "label": "조제중",
+                            })
+                            print(f"    -> 조제중 전환 예약: {ordercode}")
 
                     # ★ 팩수는 order_view.asp에 없고 탕전주문내역서에만 있음
                     # → latest_decoction에서 보완 (is_bulk_delivery·should_skip_for_cj 모두 master_data 참조)
@@ -5797,8 +5802,11 @@ def run_sp_delivery_job(detail_excel_path: str, start_date: str = "", end_date: 
 
 
 def run_sp_complete_job(start_date: str = "", end_date: str = "",
+                        ignore_status: bool = False,
                         log_callback=None, progress_callback=None, cancel_check=None):
-    """약속처방 배송완료 전환: 배송중(3) 주문 CJ 추적 확인 → 완료(4) 전환"""
+    """약속처방 배송완료 전환: CJ 추적 확인 → 완료(4) 전환
+    ignore_status=True 시 배송중 외 상태(송장번호 있는 주문)도 포함
+    """
     def log(msg):
         print(msg)
         if log_callback:
@@ -5823,8 +5831,12 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
         driver = webdriver.Chrome(options=_opts)
         login_driver(driver, ADMIN_ID, ADMIN_PW)
 
-        # 1. 배송중(3) 약속처방 목록 수집
-        update_progress(10, "약속처방 배송중 목록 수집 중...")
+        # 1. 약속처방 목록 수집 (배송중 또는 상태 무관)
+        scan_label = "전체(송장번호 있는 주문)" if ignore_status else "배송중"
+        ings_val   = ""                         if ignore_status else "3"
+        update_progress(10, f"약속처방 {scan_label} 목록 수집 중...")
+        if ignore_status:
+            log("ℹ 상태 무관 조회: 송장번호가 있는 미완료 주문을 모두 확인합니다.")
 
         driver.get(SHOP_ORDER_LIST_URL)
         time.sleep(0.8)
@@ -5835,7 +5847,7 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
             f.e_date.value     = '{end_date}';
             f.search.value     = 'name';
             f.s_string.value   = '';
-            f.order_ings.value = '3';
+            f.order_ings.value = '{ings_val}';
         """)
         driver.execute_script("(document.form2 || document.forms[0]).submit();")
         time.sleep(1.2)
@@ -5875,11 +5887,16 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
                 tracking = r.get("송장번호", "").strip()
                 if not tracking:
                     continue
+                # ignore_status 모드: 이미 완료 상태는 건너뜀
+                row_status = r.get("진행상태", "")
+                if ignore_status and row_status == "완료":
+                    continue
                 shipped_orders.append({
                     "주문번호": r["주문번호"],
                     "한의원명": r.get("한의원명", ""),
                     "detail_href": r["detail_href"],
                     "송장번호": tracking,
+                    "현재상태": row_status,
                 })
 
             log(f"페이지 {page}: {len(rows)}건")
@@ -5895,7 +5912,7 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
             time.sleep(0.8)
             page += 1
 
-        log(f"\n약속처방 배송중 {len(shipped_orders)}건 수집")
+        log(f"\n약속처방 {scan_label} {len(shipped_orders)}건 수집")
 
         if not shipped_orders:
             raise NoWorkFound("배송완료 전환 대상 약속처방 주문이 없어요.")
@@ -5947,7 +5964,8 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
                         continue
 
                     success_count += 1
-                    log(f"✓ 완료 전환: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']})")
+                    status_hint = f" [{order.get('현재상태','')}→완료]" if ignore_status and order.get('현재상태') else ""
+                    log(f"✓ 완료 전환: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']}){status_hint}")
                 else:
                     skip_count += 1
                     log(f"- 배송중: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']})")
@@ -7833,6 +7851,9 @@ def launch_gui():
     # ── 약속처방 배송완료 전환 ──
     sp_complete_lf = ttk.LabelFrame(tab3, text="약속처방 배송완료 전환", padding=(8, 4))
     sp_complete_lf.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    sp_c_ignore_status_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(sp_complete_lf, text="상태 무관 조회 (배송중 외 상태도 포함, 버그 복구용)",
+                    variable=sp_c_ignore_status_var).pack(anchor="w")
     sp_c_action_frame = ttk.Frame(sp_complete_lf)
     sp_c_action_frame.pack(fill="x")
     sp_complete_cancel_event = threading.Event()
@@ -7966,6 +7987,7 @@ def launch_gui():
                 run_sp_complete_job(
                     start_date=start_date,
                     end_date=end_date,
+                    ignore_status=sp_c_ignore_status_var.get(),
                     log_callback=c_append_log,
                     progress_callback=c_gui_progress,
                     cancel_check=sp_complete_cancel_event.is_set,
