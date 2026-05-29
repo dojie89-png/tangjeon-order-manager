@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.65"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.66"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -3976,7 +3976,8 @@ def run_bulk_ship(branch_groups: dict, tracking_by_group: dict,
 
 
 # ---------- 배송완료 전환 실행 ----------
-def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None, progress_callback=None, cancel_check=None):
+def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bool = False,
+                     log_callback=None, progress_callback=None, cancel_check=None):
     def log(msg):
         print(msg)
         if log_callback:
@@ -4002,13 +4003,17 @@ def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None
         wait = WebDriverWait(driver, 10)
         login_driver(driver, ADMIN_ID, ADMIN_PW)
 
-        # 1. 발송 상태 주문 목록 수집
-        update_progress(10, "발송 주문 목록 수집 중...")
+        # 1. 발송(또는 전체) 상태 주문 목록 수집
+        scan_ings = "" if ignore_status else STATUS_VALUE_MAP["발송"]
+        scan_label = "전체(송장번호 있는 주문)" if ignore_status else "발송"
+        update_progress(10, f"{scan_label} 주문 목록 수집 중...")
+        if ignore_status:
+            log("ℹ 상태 무관 조회: 송장번호가 있는 모든 주문을 확인합니다.")
         shipped_orders = []
         seen_seqnos = set()   # 중첩 행 중복 방지
 
         for page_no in range(1, MAX_PAGE_SAFETY_LIMIT + 1):
-            list_url = build_order_list_url(page_no, start_date, end_date, STATUS_VALUE_MAP["발송"])
+            list_url = build_order_list_url(page_no, start_date, end_date, scan_ings)
             driver.get(list_url)
             time.sleep(2)
 
@@ -4087,16 +4092,16 @@ def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None
                 })
                 found_on_page += 1
 
-            log(f"{page_no}페이지: 발송 {found_on_page}건 수집")
+            log(f"{page_no}페이지: {scan_label} {found_on_page}건 수집")
 
             order_links = soup.find_all("a", href=re.compile(r"order_view\.asp"))
             if not order_links:
                 break
 
-        log(f"\n발송 주문 총 {len(shipped_orders)}건 수집 완료")
+        log(f"\n{scan_label} 주문 총 {len(shipped_orders)}건 수집 완료")
 
         if not shipped_orders:
-            log("처리할 발송 주문이 없어요.")
+            log(f"처리할 {scan_label} 주문이 없어요.")
             update_progress(100, "완료 - 처리할 발송 주문 없음")
             raise NoWorkFound("배송완료 전환 대상 주문이 없어요.")
 
@@ -4143,6 +4148,10 @@ def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None
 
                         # 현재 선택값 확인 후 "완료" 선택
                         before_val = sel_obj.first_selected_option.text.strip()
+                        if before_val == "완료":
+                            skip_count += 1
+                            log(f"- 이미 완료: {order['ordercode']} {order['patient']} (송장: {order['tracking']})")
+                            continue
                         sel_obj.select_by_visible_text("완료")
                         time.sleep(0.3)
 
@@ -5802,11 +5811,8 @@ def run_sp_delivery_job(detail_excel_path: str, start_date: str = "", end_date: 
 
 
 def run_sp_complete_job(start_date: str = "", end_date: str = "",
-                        ignore_status: bool = False,
                         log_callback=None, progress_callback=None, cancel_check=None):
-    """약속처방 배송완료 전환: CJ 추적 확인 → 완료(4) 전환
-    ignore_status=True 시 배송중 외 상태(송장번호 있는 주문)도 포함
-    """
+    """약속처방 배송완료 전환: 배송중(3) 주문 CJ 추적 확인 → 완료(4) 전환"""
     def log(msg):
         print(msg)
         if log_callback:
@@ -5831,12 +5837,8 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
         driver = webdriver.Chrome(options=_opts)
         login_driver(driver, ADMIN_ID, ADMIN_PW)
 
-        # 1. 약속처방 목록 수집 (배송중 또는 상태 무관)
-        scan_label = "전체(송장번호 있는 주문)" if ignore_status else "배송중"
-        ings_val   = ""                         if ignore_status else "3"
-        update_progress(10, f"약속처방 {scan_label} 목록 수집 중...")
-        if ignore_status:
-            log("ℹ 상태 무관 조회: 송장번호가 있는 미완료 주문을 모두 확인합니다.")
+        # 1. 배송중(3) 약속처방 목록 수집
+        update_progress(10, "약속처방 배송중 목록 수집 중...")
 
         driver.get(SHOP_ORDER_LIST_URL)
         time.sleep(0.8)
@@ -5847,7 +5849,7 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
             f.e_date.value     = '{end_date}';
             f.search.value     = 'name';
             f.s_string.value   = '';
-            f.order_ings.value = '{ings_val}';
+            f.order_ings.value = '3';
         """)
         driver.execute_script("(document.form2 || document.forms[0]).submit();")
         time.sleep(1.2)
@@ -5887,16 +5889,11 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
                 tracking = r.get("송장번호", "").strip()
                 if not tracking:
                     continue
-                # ignore_status 모드: 이미 완료 상태는 건너뜀
-                row_status = r.get("진행상태", "")
-                if ignore_status and row_status == "완료":
-                    continue
                 shipped_orders.append({
                     "주문번호": r["주문번호"],
                     "한의원명": r.get("한의원명", ""),
                     "detail_href": r["detail_href"],
                     "송장번호": tracking,
-                    "현재상태": row_status,
                 })
 
             log(f"페이지 {page}: {len(rows)}건")
@@ -5912,7 +5909,7 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
             time.sleep(0.8)
             page += 1
 
-        log(f"\n약속처방 {scan_label} {len(shipped_orders)}건 수집")
+        log(f"\n약속처방 배송중 {len(shipped_orders)}건 수집")
 
         if not shipped_orders:
             raise NoWorkFound("배송완료 전환 대상 약속처방 주문이 없어요.")
@@ -5964,8 +5961,7 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
                         continue
 
                     success_count += 1
-                    status_hint = f" [{order.get('현재상태','')}→완료]" if ignore_status and order.get('현재상태') else ""
-                    log(f"✓ 완료 전환: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']}){status_hint}")
+                    log(f"✓ 완료 전환: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']})")
                 else:
                     skip_count += 1
                     log(f"- 배송중: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']})")
@@ -7839,6 +7835,9 @@ def launch_gui():
 
     c_tangjeon_lf = ttk.LabelFrame(tab3, text="탕전주문 배송완료 전환", padding=(8, 4))
     c_tangjeon_lf.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    c_ignore_status_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(c_tangjeon_lf, text="상태 무관 조회 (배송중 외 상태도 포함, 버그 복구용)",
+                    variable=c_ignore_status_var).pack(anchor="w")
     c_action_frame = ttk.Frame(c_tangjeon_lf)
     c_action_frame.pack(fill="x")
     c_cancel_event = threading.Event()
@@ -7851,9 +7850,6 @@ def launch_gui():
     # ── 약속처방 배송완료 전환 ──
     sp_complete_lf = ttk.LabelFrame(tab3, text="약속처방 배송완료 전환", padding=(8, 4))
     sp_complete_lf.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
-    sp_c_ignore_status_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(sp_complete_lf, text="상태 무관 조회 (배송중 외 상태도 포함, 버그 복구용)",
-                    variable=sp_c_ignore_status_var).pack(anchor="w")
     sp_c_action_frame = ttk.Frame(sp_complete_lf)
     sp_c_action_frame.pack(fill="x")
     sp_complete_cancel_event = threading.Event()
@@ -7930,6 +7926,7 @@ def launch_gui():
                 run_complete_job(
                     start_date=start_date,
                     end_date=end_date,
+                    ignore_status=c_ignore_status_var.get(),
                     log_callback=c_append_log,
                     progress_callback=c_gui_progress,
                     cancel_check=c_cancel_event.is_set,
@@ -7987,7 +7984,6 @@ def launch_gui():
                 run_sp_complete_job(
                     start_date=start_date,
                     end_date=end_date,
-                    ignore_status=sp_c_ignore_status_var.get(),
                     log_callback=c_append_log,
                     progress_callback=c_gui_progress,
                     cancel_check=sp_complete_cancel_event.is_set,
