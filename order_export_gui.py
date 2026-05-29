@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.63"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.64"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -4136,7 +4136,8 @@ def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None
                         sel_el = driver.find_element(By.NAME, "order_ing")
                         sel_obj = Select(sel_el)
 
-                        # "완료"(서버값 6) 텍스트로 선택
+                        # 현재 선택값 확인 후 "완료" 선택
+                        before_val = sel_obj.first_selected_option.text.strip()
                         sel_obj.select_by_visible_text("완료")
                         time.sleep(0.3)
 
@@ -4145,7 +4146,29 @@ def run_complete_job(start_date: str = "", end_date: str = "", log_callback=None
                             "if(typeof order_change==='function'){ order_change(); }"
                             "else{ document.forms[0].submit(); }"
                         )
-                        time.sleep(1.5)
+                        time.sleep(2)
+
+                        # 제출 후 상태 검증 — order_change.asp 재방문해서 실제 저장값 확인
+                        try:
+                            driver.get(change_page_url)
+                            WebDriverWait(driver, 8).until(
+                                EC.presence_of_element_located((By.NAME, "order_ing"))
+                            )
+                            after_val = Select(driver.find_element(By.NAME, "order_ing")).first_selected_option.text.strip()
+                            if after_val != "완료":
+                                log(f"⚠ 상태 검증 실패 ({order['ordercode']}): 제출 후 상태={after_val} (이전={before_val}) → 재시도")
+                                # 재시도 1회
+                                sel_obj2 = Select(driver.find_element(By.NAME, "order_ing"))
+                                sel_obj2.select_by_visible_text("완료")
+                                time.sleep(0.3)
+                                driver.execute_script(
+                                    "if(typeof order_change==='function'){ order_change(); }"
+                                    "else{ document.forms[0].submit(); }"
+                                )
+                                time.sleep(2)
+                        except Exception:
+                            pass
+
                     except Exception as se:
                         log(f"✗ 상태 전환 실패 ({order['ordercode']}): {se}")
                         fail_count += 1
