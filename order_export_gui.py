@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.66"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.67"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -751,6 +751,18 @@ def get_box_capacity(clinic: str, box_type: str) -> int | None:
     if "고급박스" in b:  # 고급박스1 또는 "고급박스"만 적힌 경우
         return 30
     return None  # 박스포장 없거나 인식 불가 → 분할 안 함
+
+
+_CLINIC_NAME_KEYWORDS = ["한의원", "병원", "의원", "클리닉", "의료", "한방"]
+
+def is_delivery_address_mismatch(delivery_type: str, recipient_name: str) -> bool:
+    """배송구분='한의원으로 택배'인데 받는분이 개인 이름처럼 보이면 True (주소확인 필요)"""
+    if "한의원으로 택배" not in clean_text(delivery_type):
+        return False
+    name = clean_text(recipient_name)
+    if not name:
+        return False
+    return not any(kw in name for kw in _CLINIC_NAME_KEYWORDS)
 
 
 def is_bulk_delivery(delivery_type: str, pack_count,
@@ -1813,7 +1825,21 @@ def export_label_excel(xlsx_path: str):
     else:
         df['벌크여부'] = ''
 
-    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장']
+    # 주소확인: 배송구분이 한의원택배인데 받는분이 개인처럼 보이는 경우 표시
+    if '배송구분' in df.columns and '받는분' in df.columns:
+        df['주소확인'] = df.apply(
+            lambda row: "⚠ 주소확인"
+            if is_delivery_address_mismatch(
+                str(row.get('배송구분', '') or ''),
+                str(row.get('받는분', '') or ''),
+            )
+            else "",
+            axis=1,
+        )
+    else:
+        df['주소확인'] = ''
+
+    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '주소확인']
     label_df = df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
     if '팩수' in label_df.columns:
@@ -1892,19 +1918,20 @@ def export_label_excel(xlsx_path: str):
             return f'[{s}]'
         label_df['처방명'] = label_df['처방명'].apply(_wrap_pres)
 
-    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장
+    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 주소확인
+    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '주소확인']
     cols_order = list(label_df.columns)
-    for col in ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장']:
+    for col in _tail_cols:
         if col in cols_order:
             cols_order.remove(col)
     if '라벨코드' in cols_order:
         idx = cols_order.index('라벨코드')
-        for _tail in ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장']:
+        for _tail in _tail_cols:
             if _tail in label_df.columns:
                 idx += 1
                 cols_order.insert(idx, _tail)
     else:
-        for _tail in ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장']:
+        for _tail in _tail_cols:
             if _tail in label_df.columns:
                 cols_order.append(_tail)
     label_df = label_df[cols_order]
@@ -1915,6 +1942,30 @@ def export_label_excel(xlsx_path: str):
     ts_prefix = ts_m.group(1) if ts_m else stem
     out_path = Path(xlsx_path).parent / f"{ts_prefix}_탕전 라벨 인쇄용.xlsx"
     label_df.to_excel(str(out_path), index=False)
+
+    # '주소확인' 값 있는 행 강조 (노란 배경)
+    if '주소확인' in label_df.columns:
+        try:
+            import openpyxl
+            from openpyxl.styles import PatternFill, Font
+            _wb = openpyxl.load_workbook(str(out_path))
+            _ws = _wb.active
+            _yellow      = PatternFill("solid", fgColor="FFFF00")
+            _light_yellow = PatternFill("solid", fgColor="FFFFC0")
+            _red_bold    = Font(bold=True, color="CC0000")
+            _max_col     = _ws.max_column
+            _check_col   = list(label_df.columns).index('주소확인') + 1  # 1-based
+            for _r in range(2, _ws.max_row + 1):
+                _cell = _ws.cell(row=_r, column=_check_col)
+                if _cell.value and str(_cell.value).strip():
+                    _cell.fill = _yellow
+                    _cell.font = _red_bold
+                    for _c in range(1, _max_col + 1):
+                        if _c != _check_col:
+                            _ws.cell(row=_r, column=_c).fill = _light_yellow
+            _wb.save(str(out_path))
+        except Exception as _e:
+            print(f"  (주소확인 강조 실패: {_e})")
 
     print(f"라벨 엑셀 저장: {out_path}")
     print(f"  총 {len(label_df)}건 (취소 {cancel_count}건, 입원 {inpatient_count}건 제외)")
@@ -2677,6 +2728,11 @@ def run_job(settings: dict, progress_callback=None):
                     delivery_type = clean_text(master_data.get("배송구분", ""))
                     pack_count = master_data.get("팩수", "")
                     bulk = is_bulk_delivery(delivery_type, pack_count, hospital_folder_name)
+
+                    # 배송구분 vs 받는분 불일치 경고 (한의원택배인데 받는분이 개인)
+                    recipient_name = clean_text(master_data.get("받는분", ""))
+                    if is_delivery_address_mismatch(delivery_type, recipient_name):
+                        print(f"    ⚠ 주소확인 필요 — '한의원으로택배'인데 받는분이 개인처럼 보임: {ordercode} / 받는분: {recipient_name}")
                     master_data["_bulk"] = bulk  # 벌크 내역 추출 저장용
 
                     pdf_jobs.append({
