@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.67"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.68"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -2157,7 +2157,11 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         # 고래한방 + 한의원으로 택배 → 벌크 후보. 다만 예외:
         #   (1) 세종점은 자주 없어서 CJ 파일에 리스트업
         #   (2) 팩수 30 이상은 별도 박스 포장 → CJ 파일에 리스트업
+        #   (3) 받는분이 개인처럼 보이면 (주소 불일치) → CJ 파일에 포함 (노란 강조)
         if "고래" in hospital and delivery_type == "한의원으로 택배":
+            # 받는분이 개인처럼 보이는 경우 → 배송구분이 잘못 입력된 것으로 간주, CJ에 포함
+            if is_delivery_address_mismatch(delivery_type, clean_text(row.get("받는분", "") or "")):
+                return False
             sender_addr = clean_text(row.get("보내는분_주소", "") or "")
             # 세종점은 CJ 포함
             if "세종" in sender_addr or "세종" in hospital:
@@ -2373,8 +2377,15 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         else:
             ordercode = clean_text(row.get("주문코드", ""))
             patient_name = clean_text(row.get("환자명", "") or "")
-            print(f"  [단독] {ordercode} / {patient_name}")
-            rows.append((make_row(row, ordercode, 품명_part(ordercode, patient_name, force_dosage=yakson)), False))
+            _mismatch = is_delivery_address_mismatch(
+                clean_text(row.get("배송구분", "") or ""),
+                clean_text(row.get("받는분", "") or ""),
+            )
+            if _mismatch:
+                print(f"  [단독/⚠주소확인] {ordercode} / {patient_name} (한의원택배→개인수취인)")
+            else:
+                print(f"  [단독] {ordercode} / {patient_name}")
+            rows.append((make_row(row, ordercode, 품명_part(ordercode, patient_name, force_dosage=yakson)), _mismatch))
 
     data = [r for r, _ in rows]
     highlights = [h for _, h in rows]
