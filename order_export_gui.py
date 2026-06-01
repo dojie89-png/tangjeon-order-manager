@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.69"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.70"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1825,6 +1825,38 @@ def export_label_excel(xlsx_path: str):
     else:
         df['벌크여부'] = ''
 
+    # 합포여부: [묶음] 태그 OR 같은 받는분_주소에 2건 이상 (방문수령·벌크 제외)
+    def _norm_addr(v):
+        return re.sub(r'\s+', '', clean_text(str(v or '')))
+
+    _multi_addr_idx: set = set()
+    if '받는분_주소' in df.columns:
+        _addr_grps: dict = {}
+        for _idx, _row in df.iterrows():
+            # 방문수령·벌크는 합포 판별에서 제외
+            if clean_text(str(_row.get('배송구분', '') or '')) == '방문수령':
+                continue
+            if clean_text(str(_row.get('벌크여부', '') or '')) == '벌크':
+                continue
+            _a = _norm_addr(_row.get('받는분_주소', ''))
+            if _a:
+                _addr_grps.setdefault(_a, []).append(_idx)
+        _multi_addr_idx = {_i for _idxs in _addr_grps.values() if len(_idxs) >= 2 for _i in _idxs}
+
+    def _calc_happo(row):
+        if clean_text(str(row.get('배송구분', '') or '')) == '방문수령':
+            return ''
+        if clean_text(str(row.get('벌크여부', '') or '')) == '벌크':
+            return ''
+        extra = clean_text(str(row.get('처방명_목록추가표시', '') or ''))
+        if '[묶음' in extra:
+            return '[합포]'
+        if row.name in _multi_addr_idx:
+            return '[합포]'
+        return ''
+
+    df['합포여부'] = df.apply(_calc_happo, axis=1)
+
     # 주소확인: 배송구분이 한의원택배인데 받는분이 개인처럼 보이는 경우 표시
     if '배송구분' in df.columns and '받는분' in df.columns:
         df['주소확인'] = df.apply(
@@ -1839,7 +1871,7 @@ def export_label_excel(xlsx_path: str):
     else:
         df['주소확인'] = ''
 
-    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '묶음배송', '주소확인']
+    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
     label_df = df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
     if '팩수' in label_df.columns:
@@ -1918,8 +1950,8 @@ def export_label_excel(xlsx_path: str):
             return f'[{s}]'
         label_df['처방명'] = label_df['처방명'].apply(_wrap_pres)
 
-    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 주소확인
-    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '주소확인']
+    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 합포여부 → 주소확인
+    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
     cols_order = list(label_df.columns)
     for col in _tail_cols:
         if col in cols_order:
