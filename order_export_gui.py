@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.68"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.69"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1839,7 +1839,7 @@ def export_label_excel(xlsx_path: str):
     else:
         df['주소확인'] = ''
 
-    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '주소확인']
+    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '묶음배송', '주소확인']
     label_df = df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
     if '팩수' in label_df.columns:
@@ -1918,8 +1918,8 @@ def export_label_excel(xlsx_path: str):
             return f'[{s}]'
         label_df['처방명'] = label_df['처방명'].apply(_wrap_pres)
 
-    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 주소확인
-    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '주소확인']
+    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 주소확인
+    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '주소확인']
     cols_order = list(label_df.columns)
     for col in _tail_cols:
         if col in cols_order:
