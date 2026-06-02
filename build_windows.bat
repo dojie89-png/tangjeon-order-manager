@@ -32,7 +32,18 @@ if exist dist rmdir /s /q dist
 if exist "order_export_gui.spec" del /q "order_export_gui.spec"
 
 echo [3/3] Building exe...
-py %PYVER% -m PyInstaller --onefile --windowed --collect-all selenium --name order_export_gui order_export_gui.py
+:: Python 설치 경로의 VC++ 런타임 DLL 경로 추출
+for /f "delims=" %%i in ('py %PYVER% -c "import sys, os; print(os.path.dirname(sys.executable))"') do set PYDIR=%%i
+echo Python dir: %PYDIR%
+
+:: vcruntime140_1.dll 포함 여부 확인 후 빌드 (없으면 기본 빌드)
+set EXTRA_BINS=
+if exist "%PYDIR%\vcruntime140_1.dll" (
+    set EXTRA_BINS=--add-binary "%PYDIR%\vcruntime140_1.dll;."
+    echo Including vcruntime140_1.dll
+)
+
+py %PYVER% -m PyInstaller --onefile --windowed --collect-all selenium %EXTRA_BINS% --name order_export_gui order_export_gui.py
 
 echo Done.
 echo.
