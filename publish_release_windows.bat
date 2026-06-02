@@ -2,11 +2,25 @@
 chcp 65001 > nul
 setlocal enabledelayedexpansion
 
+if /i "%~1" NEQ "__inner" (
+    start "케이진 배포" cmd /k ""%~f0" __inner"
+    exit /b
+)
+
 cd /d "%~dp0"
 set LOG=publish_release.log
 echo ==== publish_release %DATE% %TIME% ==== > "%LOG%"
 
 call :log "[Start] %CD%"
+
+if not exist "order_export_gui.py" (
+    call :log "[Error] order_export_gui.py not found. Run this file inside the project folder."
+    goto :fail
+)
+if not exist "requirements.txt" (
+    call :log "[Error] requirements.txt not found. Run this file inside the project folder."
+    goto :fail
+)
 
 set PYVER=-3.12
 py %PYVER% --version >nul 2>&1
