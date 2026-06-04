@@ -29,7 +29,7 @@ if errorlevel 1 (
     goto :fail
 )
 
-for /f "usebackq delims=" %%v in (`py %PYVER% -c "import re; p=open('order_export_gui.py', encoding='utf-8').read(); print(re.search(r'APP_VERSION\\s*=\\s*\"([^\"]+)\"', p).group(1))"`) do set APPVER=%%v
+for /f "usebackq delims=" %%v in (`py %PYVER% -c "import re; p=open('order_export_gui.py', encoding='utf-8').read(); print(re.search(r'APP_VERSION\\s*=\\s*[^0-9]*([0-9.]+)', p).group(1))"`) do set APPVER=%%v
 set TAG=v%APPVER%
 set EXE=dist\order_export_gui.exe
 
