@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.72"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.73"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -47,7 +47,9 @@ ADMIN_PW = os.environ.get("KGINBIO_ADMIN_PW", "")
 WINDOWS_CREDENTIAL_TARGET = "KGINBIO_TANGJEON_ADMIN_LOGIN"
 
 PRINT_ONLY_PREFIXED_OR_ALL = "all"
-PRINT_WAIT_SEC = 4.0
+PRINT_WAIT_SEC = 5.0          # window.print() 후 기본 대기 (초)
+PRINT_MAX_PENDING_JOBS = 2    # 스풀러 대기 작업이 이 수 이하가 될 때까지 다음 인쇄 보류
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)  # Windows: 콘솔 창 숨김
 MAX_PAGE_SAFETY_LIMIT = 50
 DEFAULT_ALL_PERIOD_MAX_PAGE = 7
 
@@ -1553,6 +1555,24 @@ def download_attachment_by_click(download_driver, page_url: str, link_text: str,
     os.replace(downloaded_path, final_path)
 
 
+def _print_pending_count() -> int:
+    """Windows 프린트 스풀러의 현재 대기 작업 수를 반환.
+    확인 불가(비-Windows / PowerShell 실패 등)이면 -1 반환."""
+    if sys.platform != "win32":
+        return -1
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-PrintJob -ErrorAction SilentlyContinue | Measure-Object).Count"],
+            capture_output=True, text=True, timeout=6,
+            creationflags=_NO_WINDOW,
+        )
+        v = r.stdout.strip()
+        return int(v) if v.lstrip("-").isdigit() else -1
+    except Exception:
+        return -1
+
+
 def print_page(print_driver, url: str, expected_ordercode: str = "") -> dict:
     print_driver.get(url)
     time.sleep(1.5)
@@ -1597,6 +1617,19 @@ def print_page(print_driver, url: str, expected_ordercode: str = "") -> dict:
     time.sleep(0.3)
     print_driver.execute_script("window.print();")
     time.sleep(PRINT_WAIT_SEC)
+
+    # 프린트 스풀러 과부하 방지: 대기 작업이 PRINT_MAX_PENDING_JOBS 이하로 내려올 때까지 대기
+    # 한꺼번에 몰리면 프린터가 작업을 드롭하는 현상 방지
+    _extra_sec = 0
+    while _extra_sec < 60:
+        _pending = _print_pending_count()
+        if _pending < 0 or _pending <= PRINT_MAX_PENDING_JOBS:
+            break
+        time.sleep(2.0)
+        _extra_sec += 2
+    if _extra_sec > 0:
+        print(f"    [인쇄] 스풀러 대기열 소진 대기 +{_extra_sec}초 (잔여 {_pending}건)")
+
     return {
         "title": page_title,
         "url": current_url,
