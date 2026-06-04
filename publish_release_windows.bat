@@ -48,7 +48,14 @@ if errorlevel 1 goto :fail
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist "order_export_gui.spec" del /q "order_export_gui.spec"
-call :run py %PYVER% -m PyInstaller --onefile --windowed --collect-all selenium --name order_export_gui order_export_gui.py
+for /f "usebackq delims=" %%i in (`py %PYVER% -c "import sys, os; print(os.path.dirname(sys.executable))"`) do set PYDIR=%%i
+call :log "[Python dir] %PYDIR%"
+set EXTRA_BINS=
+if exist "%PYDIR%\vcruntime140_1.dll" (
+    set EXTRA_BINS=--add-binary "%PYDIR%\vcruntime140_1.dll;."
+    call :log "[DLL] vcruntime140_1.dll 포함"
+)
+call :run py %PYVER% -m PyInstaller --onefile --windowed --collect-all selenium %EXTRA_BINS% --name order_export_gui order_export_gui.py
 if errorlevel 1 goto :fail
 if not exist "%EXE%" (
     call :log "[Error] Build failed: %EXE% not found."

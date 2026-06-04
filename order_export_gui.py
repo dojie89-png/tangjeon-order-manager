@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.70"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.71"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -2749,7 +2749,9 @@ def run_job(settings: dict, progress_callback=None):
 
                     # 정상 주문 → 조제중 자동 전환 예약 (입원·취소 제외)
                     elif settings.get("auto_dispensing_status") and not inpatient:
-                        _skip_for_dispensing = {"발송", "예약발송", "완료", "환불취소"}
+                        # 이미 조제중 이후 상태이거나 송장번호가 있으면 전환 스킵
+                        # "조제중", "탕전중" 포함: 실수로 해당 상태를 조회해도 회귀 방지
+                        _skip_for_dispensing = {"조제중", "탕전중", "발송", "예약발송", "완료", "환불취소"}
                         _existing_trk = normalize_tracking_no(master_data.get("송장번호", ""))
                         if status in _skip_for_dispensing or _existing_trk:
                             print(f"    -> 조제중 전환 스킵 (상태={status}, 송장={_existing_trk or '-'}): {ordercode}")
@@ -4247,9 +4249,9 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
 
                         # 현재 선택값 확인 후 "완료" 선택
                         before_val = sel_obj.first_selected_option.text.strip()
-                        if before_val == "완료":
+                        if before_val in {"완료", "환불취소"}:
                             skip_count += 1
-                            log(f"- 이미 완료: {order['ordercode']} {order['patient']} (송장: {order['tracking']})")
+                            log(f"- 스킵 (현재 상태={before_val}): {order['ordercode']} {order['patient']} (송장: {order['tracking']})")
                             continue
                         sel_obj.select_by_visible_text("완료")
                         time.sleep(0.3)
@@ -6047,7 +6049,14 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
                         sel_el = WebDriverWait(driver, 10).until(
                             EC.presence_of_element_located((By.NAME, "order_ing"))
                         )
-                        Select(sel_el).select_by_value("4")
+                        sel_obj2 = Select(sel_el)
+                        current_val = sel_obj2.first_selected_option.get_attribute("value")
+                        if current_val == "4":
+                            # 이미 완료 상태 → 스킵
+                            skip_count += 1
+                            log(f"- 이미 완료: {order['주문번호']} {order['한의원명']} (송장: {order['송장번호']})")
+                            continue
+                        sel_obj2.select_by_value("4")
                         time.sleep(0.3)
                         driver.execute_script(
                             "if(typeof order_change==='function'){ order_change(); }"
