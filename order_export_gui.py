@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.73"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.74"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -744,7 +744,7 @@ def get_box_capacity(clinic: str, box_type: str) -> int | None:
     b = clean_text(str(box_type or ""))
     if "고래" in c:
         if "관저" in c or "판암" in c:
-            return 40
+            return 50
         return 30  # 세종, 오창 등
     if "본가" in c:
         return 30  # 본가한의원: 박스포장 무관 30포 단위
