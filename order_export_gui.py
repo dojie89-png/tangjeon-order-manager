@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.71"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.72"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -1838,6 +1838,9 @@ def export_label_excel(xlsx_path: str):
                 continue
             if clean_text(str(_row.get('벌크여부', '') or '')) == '벌크':
                 continue
+            # 필한방병원은 주소가 같아도 개별 발송 → 합포 판별 제외
+            if "필한방" in clean_text(str(_row.get('한의원_구분', '') or '')):
+                continue
             _a = _norm_addr(_row.get('받는분_주소', ''))
             if _a:
                 _addr_grps.setdefault(_a, []).append(_idx)
@@ -2287,6 +2290,10 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         if should_skip_for_cj(row):
             return False
         if clean_text(row.get("배송구분", "")) == "방문수령":
+            return False
+        # 필한방병원은 주소가 같아도 개별 발송 → 자동묶음 제외
+        _hosp = clean_text(row.get("한의원명", "") or row.get("보내는분", "") or "")
+        if "필한방" in _hosp:
             return False
         # 이미 [묶음] 태그 기반 bundle_groups에 포함된 주문은 제외
         if _has_bundle_tag(row):
