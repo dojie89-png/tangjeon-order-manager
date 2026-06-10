@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.74"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.75"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -3759,7 +3759,7 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
 # ---------- 벌크 발송처리 ----------
 BULK_BOX_SIZE = 11      # 한 박스당 주문 수
 BULK_SCAN_STATUSES = ["접수대기", "조제중", "탕전중"]
-GORAE_BRANCHES = ["관저", "판암", "세종"]
+GORAE_BRANCHES = ["관저", "판암", "세종", "오창"]
 
 
 def extract_gorae_branch(hospital_folder_name: str) -> str:
@@ -3936,7 +3936,7 @@ def run_bulk_scan(start_date: str = "", end_date: str = "",
 
                     # 지점 결정 — combined 텍스트 검색 → 없으면 회원명 fallback
                     branch = "기타"
-                    for b in GORAE_BRANCHES:  # ["관저", "판암", "세종"]
+                    for b in GORAE_BRANCHES:  # ["관저", "판암", "세종", "오창"]
                         if b in combined:
                             branch = b
                             break
