@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.75"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.76"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -6410,9 +6410,10 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
 
         for r in master_results:
             _tlist = r.get("_tax_list", [])
-            # 주문 단위 합계: 공급가액합계(면세금액 포함, 부가세 제외) / 부가세합계
-            _sum_supply = 0   # 공급가액 + 면세금액 (수량 반영)
+            # 주문 단위 합계: 공급가액합계(과세품목) / 부가세합계 / 면세공급가액합계 분리
+            _sum_supply = 0   # 과세품목 공급가액 (수량 반영)
             _sum_vat    = 0   # 부가세 (수량 반영)
+            _sum_exempt = 0   # 면세 공급가액 (수량 반영)
             for _i in range(_max_prods):
                 _pfx = f"상품{_i + 1}_"
                 _ti  = _tlist[_i] if _i < len(_tlist) else {}
@@ -6436,20 +6437,23 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
                     r[f"{_pfx}공급가액금액"] = _supply_amt
                     r[f"{_pfx}부가세금액"]   = _vat_amt
                     r[f"{_pfx}면세금액금액"] = _exempt_amt
-                    # 합계: 공급가액합계는 공급가액+면세금액(부가세 제외), 부가세합계는 부가세만
-                    _sum_supply += _supply_amt + _exempt_amt
+                    # 합계: 공급가액합계=과세품목 공급가액, 부가세합계=부가세, 면세공급가액합계=면세금액 (분리)
+                    _sum_supply += _supply_amt
                     _sum_vat    += _vat_amt
+                    _sum_exempt += _exempt_amt
                 else:
                     r[f"{_pfx}공급가액금액"] = ""
                     r[f"{_pfx}부가세금액"]   = ""
                     r[f"{_pfx}면세금액금액"] = ""
 
-            r["공급가액합계"] = _sum_supply if _sum_supply or _sum_vat else ""
-            r["부가세합계"]   = _sum_vat    if _sum_supply or _sum_vat else ""
+            _has_amt = _sum_supply or _sum_vat or _sum_exempt
+            r["공급가액합계"]     = _sum_supply if _has_amt else ""
+            r["부가세합계"]       = _sum_vat    if _has_amt else ""
+            r["면세공급가액합계"] = _sum_exempt if _has_amt else ""
 
             # 카페 주문에서 결제금액이 미기재인 경우 계산된 합계로 보완
-            if not r.get("결제금액_총액") and (_sum_supply or _sum_vat):
-                _computed_total = _sum_supply + _sum_vat
+            if not r.get("결제금액_총액") and (_sum_supply or _sum_vat or _sum_exempt):
+                _computed_total = _sum_supply + _sum_vat + _sum_exempt
                 r["결제금액_총액"] = _computed_total
                 if not r.get("처방비용"):
                     r["처방비용"] = _computed_total
@@ -6457,7 +6461,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
         # 열 순서:
         #   주문번호~주문상품 → 결제금액군 → 주문상품N/수량 → 입금~주문링크 → 상품N_금액/단가
         _payment_cols = ["결제금액_총액", "처방비용", "배송료", "포인트",
-                         "공급가액합계", "부가세합계", "결제방법"]
+                         "공급가액합계", "부가세합계", "면세공급가액합계", "결제방법"]
         _payment_set  = set(_payment_cols)
         _op_idx = (_SHOP_ORDER_EXCEL_COLS.index("주문상품")
                    if "주문상품" in _SHOP_ORDER_EXCEL_COLS else len(_SHOP_ORDER_EXCEL_COLS) - 1)
@@ -6506,7 +6510,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
 
             # 금액 컬럼 숫자 변환 (텍스트→숫자, 엑셀 초록삼각형 방지)
             _numeric_str_cols = ["결제금액_총액", "처방비용", "배송료", "포인트",
-                                 "공급가액합계", "부가세합계"]
+                                 "공급가액합계", "부가세합계", "면세공급가액합계"]
             _numeric_val_cols = [c for c in df_excel.columns
                                  if any(c.endswith(sfx) for sfx in
                                         ("공급가액금액", "부가세금액", "면세금액금액",
