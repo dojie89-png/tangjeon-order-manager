@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.76"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.77"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -215,9 +215,33 @@ def _do_update(parent):
         messagebox.showinfo("업데이트", "다운로드를 시작할게요. 잠시 기다려주세요.", parent=parent)
         resp = requests.get(download_url, stream=True, timeout=60)
         resp.raise_for_status()
+        # 서버가 알려준 전체 크기 (무결성 검증용)
+        expected_size = int(resp.headers.get("Content-Length", "0") or "0")
+        written = 0
         with open(new_exe, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+                if chunk:
+                    f.write(chunk)
+                    written += len(chunk)
+
+        # ── 다운로드 무결성 검증 (잘린 exe 실행 → python DLL 로드 실패 방지) ──
+        if expected_size and written != expected_size:
+            try: os.remove(new_exe)
+            except OSError: pass
+            raise Exception(
+                f"다운로드가 중간에 끊겼어요 ({written:,}/{expected_size:,} 바이트).\n"
+                "인터넷 연결을 확인하고 다시 시도해주세요."
+            )
+        # 최소 크기 + PE(exe) 헤더(MZ) 확인
+        if written < 1_000_000:
+            try: os.remove(new_exe)
+            except OSError: pass
+            raise Exception(f"받은 파일이 너무 작아요 ({written:,} 바이트). 다시 시도해주세요.")
+        with open(new_exe, "rb") as _vf:
+            if _vf.read(2) != b"MZ":
+                try: os.remove(new_exe)
+                except OSError: pass
+                raise Exception("받은 파일이 올바른 실행 파일이 아니에요. 다시 시도해주세요.")
 
         # 현재 exe 교체 후 재시작하는 배치 스크립트
         bat_lines = [
