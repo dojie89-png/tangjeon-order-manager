@@ -24,7 +24,7 @@ import threading
 import traceback
 
 
-APP_VERSION = "13.77"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.78"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -775,7 +775,7 @@ def get_box_capacity(clinic: str, box_type: str) -> int | None:
     if "고급박스2" in b or "고급 박스 2" in b:
         return 70
     if "고급박스" in b:  # 고급박스1 또는 "고급박스"만 적힌 경우
-        return 30
+        return 50
     return None  # 박스포장 없거나 인식 불가 → 분할 안 함
 
 
