@@ -43,7 +43,7 @@ if exist "%PYDIR%\vcruntime140_1.dll" (
     echo Including vcruntime140_1.dll
 )
 
-py %PYVER% -m PyInstaller --onefile --windowed --collect-all selenium %EXTRA_BINS% --name order_export_gui order_export_gui.py
+py %PYVER% -m PyInstaller --onefile --windowed --collect-all selenium %EXTRA_BINS% --add-data "label_app;label_app" --name order_export_gui order_export_gui.py
 
 echo Done.
 echo.

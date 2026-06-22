@@ -22,9 +22,56 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
 import traceback
+import webbrowser
+import functools
+import http.server
+import socketserver
 
 
-APP_VERSION = "13.78"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.79"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+
+
+# ---------- 라벨 메이커 (로컬 HTTP 서버) ----------
+# file:// 로 열면 PyInstaller _MEIPASS 임시폴더 경로가 매번 바뀌어 브라우저가
+# 다른 origin 으로 인식 → localStorage(저장된 시안) 초기화됨.
+# 반드시 고정 포트의 로컬 HTTP 서버로 띄워 origin 을 항상 동일하게 유지한다.
+LABEL_APP_PORT = 8753
+
+def _label_app_dir():
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "label_app")
+
+_label_server_started = False
+
+class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+def _start_label_server():
+    global _label_server_started
+    if _label_server_started:
+        return
+    handler = functools.partial(_QuietHandler, directory=_label_app_dir())
+    # ThreadingTCPServer: 브라우저의 동시 요청(html·폰트·이미지)을 병렬 처리.
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    try:
+        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", LABEL_APP_PORT), handler)
+    except OSError:
+        _label_server_started = True  # 이미 떠 있음 → 재사용
+        return
+    httpd.daemon_threads = True
+    # 클라이언트 연결 조기 종료(BrokenPipe 등)는 정상 상황 → 무음 처리.
+    # --windowed exe 는 stderr 가 없어 기본 traceback 출력이 스레드를 죽일 수 있음.
+    httpd.handle_error = lambda request, client_address: None
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _label_server_started = True
+
+def open_label_maker():
+    try:
+        _start_label_server()
+        webbrowser.open(f"http://127.0.0.1:{LABEL_APP_PORT}/index.html")
+    except Exception as e:
+        messagebox.showerror("라벨 메이커", f"라벨 메이커를 열 수 없습니다.\n{e}")
 
 BASE_URL = os.environ.get("KGINBIO_BASE_URL", "https://www.kginbio.com/admin").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/"
@@ -6649,6 +6696,11 @@ def launch_gui():
 
     # 전역 실행 잠금 — 탭 하나가 돌아가는 동안 다른 탭 실행 방지
     _global_running = threading.Event()
+
+    # 상단 툴바 (전역 버튼)
+    toolbar = ttk.Frame(root)
+    toolbar.pack(fill="x", padx=8, pady=(8, 0))
+    ttk.Button(toolbar, text="🏷 라벨 메이커", command=open_label_maker).pack(side="left", padx=4)
 
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True, padx=8, pady=8)

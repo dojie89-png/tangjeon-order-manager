@@ -55,7 +55,7 @@ if exist "%PYDIR%\vcruntime140_1.dll" (
     set EXTRA_BINS=--add-binary "%PYDIR%\vcruntime140_1.dll;."
     call :log "[DLL] vcruntime140_1.dll 포함"
 )
-call :run py %PYVER% -m PyInstaller --onefile --windowed --collect-all selenium %EXTRA_BINS% --name order_export_gui order_export_gui.py
+call :run py %PYVER% -m PyInstaller --onefile --windowed --collect-all selenium %EXTRA_BINS% --add-data "label_app;label_app" --name order_export_gui order_export_gui.py
 if errorlevel 1 goto :fail
 if not exist "%EXE%" (
     call :log "[Error] Build failed: %EXE% not found."
