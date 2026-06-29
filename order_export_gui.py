@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.80"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.81"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ---------- 라벨 메이커 (로컬 HTTP 서버) ----------
@@ -2783,7 +2783,24 @@ def run_job(settings: dict, progress_callback=None):
                     dispense_url = build_dispense_url_from_detail_url(href)
                     latest_decoction = {}
 
-                    if decoction_url and (not search_keywords or search_patient):
+                    # 검색 필터 1단계 — 목록 정보(회원명)로 우선 판정 (상세조회 불필요)
+                    _member = clean_text(master_data.get("회원명", "") or "")
+                    _member_match = bool(search_keywords) and search_member and any(
+                        kw in _member for kw in search_keywords)
+
+                    # 주문자명 전용 검색이고 회원명이 불일치하면 상세조회 없이 제외
+                    if search_keywords and not search_patient and not _member_match:
+                        print(f"    -> 제외: {search_target} 필터 '{search_filter}' 미일치 (주문자={_member})")
+                        continue
+
+                    # 탕전주문내역서(팩수·배송구분·복용법·박스포장 등) 수집.
+                    # 보관 확정 주문엔 항상 필요하고, 환자명 검색은 복용자 매칭에도 사용.
+                    _need_decoction = (
+                        not search_keywords      # 검색 없음 → 전건 수집
+                        or _member_match         # 회원 일치 → 보관 확정
+                        or search_patient        # 환자명 검색 → 복용자 확인용
+                    )
+                    if decoction_url and _need_decoction:
                         try:
                             driver.get(decoction_url)
                             time.sleep(1.5)
@@ -2794,16 +2811,15 @@ def run_job(settings: dict, progress_callback=None):
                             print(f"    -> {msg}")
                             error_logs.append(msg)
 
-                    if search_keywords:
-                        _member = clean_text(master_data.get("회원명", "") or "")
+                    # 검색 필터 2단계 — 환자명(복용자) 매칭 (상세조회 결과 사용)
+                    if search_keywords and not _member_match:
                         patient_haystack = clean_text(" ".join([
                             str(master_data.get("환자명", "") or ""),
                             str(latest_decoction.get("복용자", "") or "") if latest_decoction else "",
                             str(item.get("row_text", "") or ""),
                         ]))
-                        member_match = search_member and any(kw in _member for kw in search_keywords)
                         patient_match = search_patient and any(kw in patient_haystack for kw in search_keywords)
-                        if not (member_match or patient_match):
+                        if not patient_match:
                             print(
                                 f"    -> 제외: {search_target} 필터 '{search_filter}' 미일치 "
                                 f"(주문자={_member}, 환자={patient_haystack})"
