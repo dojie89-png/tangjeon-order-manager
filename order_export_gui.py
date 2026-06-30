@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.82"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.83"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -282,67 +282,120 @@ def is_newer_version(latest: str, current: str) -> bool:
 
 
 def _do_update(parent):
-    """최신 exe를 다운로드하고 현재 exe를 교체한 뒤 재시작."""
+    """최신 exe를 진행률 표시와 함께 다운로드하고 현재 exe를 교체한 뒤 재시작."""
     if not getattr(sys, "frozen", False):
         messagebox.showinfo("업데이트", "개발 환경에서는 자동 업데이트가 지원되지 않아요.\n새 버전은 직접 빌드해주세요.", parent=parent)
         return
+
+    download_url = (
+        f"https://github.com/{GITHUB_REPO}/releases/latest/download/{GITHUB_RELEASE_EXE_NAME}"
+    )
+    current_exe = sys.executable
+    new_exe = current_exe + ".new"
+
+    # ── 진행률 창 (다운로드 중에도 UI 가 멈추지 않도록 백그라운드 스레드로 받음) ──
+    win = tk.Toplevel(parent)
+    win.title("업데이트")
+    win.resizable(False, False)
+    win.transient(parent)
+    win.grab_set()
+    win.protocol("WM_DELETE_WINDOW", lambda: None)  # 다운로드 중 창 닫기 방지
+    ttk.Label(
+        win,
+        text="새 버전을 다운로드하고 있어요.\n끝나면 자동으로 새 버전으로 다시 시작됩니다.\n창을 닫지 말고 잠시 기다려주세요.",
+        justify="left",
+    ).pack(padx=20, pady=(16, 10))
+    _pb = ttk.Progressbar(win, mode="determinate", length=340, maximum=100)
+    _pb.pack(padx=20, pady=(0, 6))
+    _lbl = ttk.Label(win, text="0%")
+    _lbl.pack(padx=20, pady=(0, 16))
+    win.update_idletasks()
     try:
-        download_url = (
-            f"https://github.com/{GITHUB_REPO}/releases/latest/download/{GITHUB_RELEASE_EXE_NAME}"
-        )
-        current_exe = sys.executable
-        new_exe = current_exe + ".new"
+        _x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_width()) // 2
+        _y = parent.winfo_rooty() + (parent.winfo_height() - win.winfo_height()) // 2
+        win.geometry(f"+{max(_x, 0)}+{max(_y, 0)}")
+    except Exception:
+        pass
 
-        messagebox.showinfo("업데이트", "다운로드를 시작할게요. 잠시 기다려주세요.", parent=parent)
-        resp = requests.get(download_url, stream=True, timeout=60)
-        resp.raise_for_status()
-        # 서버가 알려준 전체 크기 (무결성 검증용)
-        expected_size = int(resp.headers.get("Content-Length", "0") or "0")
-        written = 0
-        with open(new_exe, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    written += len(chunk)
+    def _set_progress(pct, text):
+        try:
+            _pb["value"] = pct
+            _lbl.config(text=text)
+        except Exception:
+            pass
 
-        # ── 다운로드 무결성 검증 (잘린 exe 실행 → python DLL 로드 실패 방지) ──
-        if expected_size and written != expected_size:
-            try: os.remove(new_exe)
-            except OSError: pass
-            raise Exception(
-                f"다운로드가 중간에 끊겼어요 ({written:,}/{expected_size:,} 바이트).\n"
-                "인터넷 연결을 확인하고 다시 시도해주세요."
+    def _finish_ok():
+        # 메인스레드: 교체 배치 작성 → 실행 → 종료
+        try:
+            bat_lines = [
+                "@echo off",
+                "ping 127.0.0.1 -n 3 > nul",
+                f'move /y "{new_exe}" "{current_exe}"',
+                f'start "" "{current_exe}"',
+                'del "%~f0"',
+            ]
+            bat_path = current_exe + "_updater.bat"
+            with open(bat_path, "w", encoding="cp949") as f:
+                f.write("\r\n".join(bat_lines) + "\r\n")
+            subprocess.Popen(
+                ["cmd", "/c", bat_path],
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
             )
-        # 최소 크기 + PE(exe) 헤더(MZ) 확인
-        if written < 1_000_000:
-            try: os.remove(new_exe)
-            except OSError: pass
-            raise Exception(f"받은 파일이 너무 작아요 ({written:,} 바이트). 다시 시도해주세요.")
-        with open(new_exe, "rb") as _vf:
-            if _vf.read(2) != b"MZ":
-                try: os.remove(new_exe)
-                except OSError: pass
-                raise Exception("받은 파일이 올바른 실행 파일이 아니에요. 다시 시도해주세요.")
-
-        # 현재 exe 교체 후 재시작하는 배치 스크립트
-        bat_lines = [
-            "@echo off",
-            "ping 127.0.0.1 -n 3 > nul",
-            f'move /y "{new_exe}" "{current_exe}"',
-            f'start "" "{current_exe}"',
-            'del "%~f0"',
-        ]
-        bat_path = current_exe + "_updater.bat"
-        with open(bat_path, "w", encoding="cp949") as f:
-            f.write("\r\n".join(bat_lines) + "\r\n")
-
-        subprocess.Popen(
-            ["cmd", "/c", bat_path],
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-        )
+        except Exception as e:
+            try: win.destroy()
+            except Exception: pass
+            messagebox.showerror("업데이트 실패", f"업데이트 적용 중 오류:\n{e}", parent=parent)
+            return
         sys.exit(0)
-    except Exception as e:
-        messagebox.showerror("업데이트 실패", f"업데이트 중 오류가 발생했어요:\n{e}", parent=parent)
+
+    def _fail(msg):
+        try:
+            win.grab_release(); win.destroy()
+        except Exception:
+            pass
+        try:
+            if os.path.exists(new_exe):
+                os.remove(new_exe)
+        except OSError:
+            pass
+        messagebox.showerror("업데이트 실패", f"업데이트 중 오류가 발생했어요:\n{msg}", parent=parent)
+
+    def _worker():
+        try:
+            resp = requests.get(download_url, stream=True, timeout=60)
+            resp.raise_for_status()
+            expected_size = int(resp.headers.get("Content-Length", "0") or "0")
+            written = 0
+            with open(new_exe, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+                        written += len(chunk)
+                        _mb = written / 1048576
+                        if expected_size:
+                            _pct = min(99, written * 100 // expected_size)
+                            _tot = expected_size / 1048576
+                            parent.after(0, lambda p=_pct, m=_mb, t=_tot:
+                                         _set_progress(p, f"{p}%   ({m:.1f} / {t:.1f} MB)"))
+                        else:
+                            parent.after(0, lambda m=_mb: _set_progress(0, f"{m:.1f} MB 받는 중..."))
+
+            # ── 무결성 검증 (잘린 exe 실행 → python DLL 로드 실패 방지) ──
+            if expected_size and written != expected_size:
+                raise Exception(f"다운로드가 중간에 끊겼어요 ({written:,}/{expected_size:,} 바이트).\n"
+                                "인터넷 연결을 확인하고 다시 시도해주세요.")
+            if written < 1_000_000:
+                raise Exception(f"받은 파일이 너무 작아요 ({written:,} 바이트). 다시 시도해주세요.")
+            with open(new_exe, "rb") as _vf:
+                if _vf.read(2) != b"MZ":
+                    raise Exception("받은 파일이 올바른 실행 파일이 아니에요. 다시 시도해주세요.")
+
+            parent.after(0, lambda: _set_progress(100, "100%   완료 — 새 버전으로 재시작 중..."))
+            parent.after(400, _finish_ok)
+        except Exception as e:
+            parent.after(0, lambda msg=str(e): _fail(msg))
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def check_and_prompt_update(parent):
@@ -6683,7 +6736,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
 def launch_gui():
     root = tk.Tk()
     root.title(f"케이진 탕전주문 관리 v{APP_VERSION}")
-    root.geometry("540x840")
+    root.geometry("540x884")      # 라벨 메이커 툴바 추가분 반영 (하단 실행 버튼 잘림 방지)
     root.resizable(False, True)   # 세로 리사이즈 허용 (맥에서 하단 잘림 대응)
 
     # 메인스레드 콜백(root.after 등) 예외가 Tk 이벤트루프를 죽이지 않도록 안전 처리.
