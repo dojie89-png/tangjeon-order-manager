@@ -28,7 +28,41 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.81"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.82"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+
+
+# ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
+#    None 에 쓰다 예외 → Tk 메인스레드를 죽이고 앱이 통째로 꺼질 수 있음.
+#    None 일 때만 안전 싱크로 대체 (stderr 는 런타임 로그 파일에 기록).
+def _runtime_log_path() -> str:
+    try:
+        base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+            else os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base = os.getcwd()
+    return os.path.join(base, "runtime_error.log")
+
+class _SafeStdSink:
+    """None 대체용 스트림. stdout=조용히 폐기, stderr=런타임 로그 파일에 누적 기록."""
+    def __init__(self, to_file: bool = False):
+        self._to_file = to_file
+    def write(self, data):
+        if self._to_file and data and str(data).strip():
+            try:
+                with open(_runtime_log_path(), "a", encoding="utf-8") as f:
+                    f.write(data)
+            except Exception:
+                pass
+        return len(data) if data else 0
+    def flush(self):
+        pass
+    def isatty(self):
+        return False
+
+if sys.stdout is None:
+    sys.stdout = _SafeStdSink(to_file=False)
+if sys.stderr is None:
+    sys.stderr = _SafeStdSink(to_file=True)
 
 
 # ---------- 라벨 메이커 (로컬 HTTP 서버) ----------
@@ -6651,6 +6685,30 @@ def launch_gui():
     root.title(f"케이진 탕전주문 관리 v{APP_VERSION}")
     root.geometry("540x840")
     root.resizable(False, True)   # 세로 리사이즈 허용 (맥에서 하단 잘림 대응)
+
+    # 메인스레드 콜백(root.after 등) 예외가 Tk 이벤트루프를 죽이지 않도록 안전 처리.
+    # 기본 핸들러는 stderr 로 traceback 을 쓰는데 windowed exe 는 stderr 가 None.
+    def _report_callback_exception(exc, val, tb):
+        try:
+            with open(_runtime_log_path(), "a", encoding="utf-8") as f:
+                f.write(f"\n==== Tkinter callback {datetime.now():%Y-%m-%d %H:%M:%S} (v{APP_VERSION}) ====\n")
+                f.write("".join(traceback.format_exception(exc, val, tb)))
+        except Exception:
+            pass
+    root.report_callback_exception = _report_callback_exception
+
+    # 백그라운드(daemon) 스레드의 미처리 예외도 로그로 남김 (앱 종료 진단용)
+    def _thread_excepthook(args):
+        try:
+            with open(_runtime_log_path(), "a", encoding="utf-8") as f:
+                f.write(f"\n==== Thread '{getattr(args.thread, 'name', '?')}' {datetime.now():%Y-%m-%d %H:%M:%S} (v{APP_VERSION}) ====\n")
+                f.write("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+        except Exception:
+            pass
+    try:
+        threading.excepthook = _thread_excepthook
+    except Exception:
+        pass
 
     # 진행바 완료/오류 색상 (네이티브 테마 유지, Windows vista 테마에서 background 적용됨)
     _style = ttk.Style()
