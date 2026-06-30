@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.87"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.88"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2173,8 +2173,9 @@ def export_label_excel(xlsx_path: str):
             return f'[{s}]'
         label_df['처방명'] = label_df['처방명'].apply(_wrap_pres)
 
-    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 합포여부 → 주소확인 → 조제지시사항(맨 끝, 서술형 긴 텍스트)
-    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인', '조제지시사항']
+    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 합포여부 → 주소확인
+    # (조제지시사항은 아래에서 항목별로 분리해 맨 오른쪽에 추가)
+    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
     cols_order = list(label_df.columns)
     for col in _tail_cols:
         if col in cols_order:
@@ -2190,6 +2191,22 @@ def export_label_excel(xlsx_path: str):
             if _tail in label_df.columns:
                 cols_order.append(_tail)
     label_df = label_df[cols_order]
+
+    # 조제지시사항을 항목별로 분리 → 조제지시사항1, 2, 3... (맨 오른쪽).
+    # 구분자: '/'(슬래시) 또는 '.'(마침표). 괄호 안 쉼표(예: "(아침,저녁)")는 보존.
+    # 개금365처럼 여러 지시를 서술형으로 적는 경우 항목별로 칸이 나뉘어 읽기 쉬움.
+    if '조제지시사항' in label_df.columns:
+        def _split_note(v):
+            s = clean_text(str(v or ''))
+            if not s:
+                return []
+            return [p.strip() for p in re.split(r'\s*[/.]\s*', s) if p.strip()]
+        _notes_split = label_df['조제지시사항'].apply(_split_note)
+        _max_note = max((len(x) for x in _notes_split), default=0)
+        label_df = label_df.drop(columns=['조제지시사항'])
+        for _ni in range(_max_note):
+            label_df[f'조제지시사항{_ni + 1}'] = _notes_split.apply(
+                lambda lst, _ni=_ni: lst[_ni] if _ni < len(lst) else '')
 
     # 타임스탬프(YYYYMMDD_HHMMSS) 추출 → "YYYYMMDD_HHMMSS_탕전 라벨 인쇄용.xlsx"
     stem = Path(xlsx_path).stem
