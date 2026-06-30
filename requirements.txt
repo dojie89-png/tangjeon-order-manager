@@ -1,5 +1,8 @@
 selenium
 beautifulsoup4
-pandas
+# pandas/numpy 는 안정 버전 고정 — 최신(3.0.x)에서 sort_values 네이티브 크래시
+# (Windows access violation) 발생. 임의 업그레이드 금지.
+pandas==2.2.3
+numpy==1.26.4
 requests
 openpyxl
