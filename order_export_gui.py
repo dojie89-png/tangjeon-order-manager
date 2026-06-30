@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.83"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.84"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -63,6 +63,19 @@ if sys.stdout is None:
     sys.stdout = _SafeStdSink(to_file=False)
 if sys.stderr is None:
     sys.stderr = _SafeStdSink(to_file=True)
+
+# ── 네이티브 크래시(segfault/access violation 등) 추적 ──
+# C 라이브러리(pandas/numpy/tkinter 등)에서 터지면 파이썬 traceback 없이 즉시 종료됨.
+# faulthandler 가 크래시 순간의 전체 스레드 스택을 파일에 덤프 → 원인 라인 추적.
+_fatal_log_file = None
+def _fatal_crash_log_path() -> str:
+    return os.path.join(os.path.dirname(_runtime_log_path()), "fatal_crash.log")
+try:
+    import faulthandler as _faulthandler
+    _fatal_log_file = open(_fatal_crash_log_path(), "w", encoding="utf-8")
+    _faulthandler.enable(file=_fatal_log_file, all_threads=True)
+except Exception:
+    pass
 
 
 # ---------- 라벨 메이커 (로컬 HTTP 서버) ----------
