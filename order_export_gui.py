@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.86"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.87"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2081,7 +2081,7 @@ def export_label_excel(xlsx_path: str):
     else:
         df['주소확인'] = ''
 
-    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
+    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인', '조제지시사항']
     label_df = df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
     if '팩수' in label_df.columns:
@@ -2095,14 +2095,27 @@ def export_label_excel(xlsx_path: str):
         _box_type = str(_row.get('박스포장', '') or '')
         _packs    = _row.get('팩수', None)
         _cap      = get_box_capacity(_clinic, _box_type)
+        # 개금365: 린다이어트(파우치/박스)는 조제지시사항에 서술형으로 기재됨.
+        # 30포 초과 시 2박스로 분할 → 박스당 30포 기준.
+        if _cap is None and "개금" in _clinic:
+            _note_ns = str(_row.get('조제지시사항', '') or '').replace(" ", "")
+            if "린다이어트" in _note_ns:
+                _cap = 30
         try:
             _packs_int = int(_packs)
         except (ValueError, TypeError):
             _packs_int = 0
         if _cap and _packs_int > _cap:
             _n = _math.ceil(_packs_int / _cap)
+            # 팩수를 박스 수만큼 균등 분배 (예: 60팩 2박스 → 30/30, 110팩 3박스 → 37/37/36)
+            _base = _packs_int // _n
+            _rem  = _packs_int % _n
+            _pouch_vol = str(_row.get('파우치용량', '') or '')
             for _i in range(1, _n + 1):
                 _d = _row.to_dict()
+                _box_packs = _base + (1 if _i <= _rem else 0)
+                _d['팩수'] = _box_packs
+                _d['용량'] = f'{_box_packs}팩 / {_pouch_vol}'
                 _d['박스번호'] = f'{_i}/{_n}'
                 _split_rows.append(_d)
         else:
@@ -2160,8 +2173,8 @@ def export_label_excel(xlsx_path: str):
             return f'[{s}]'
         label_df['처방명'] = label_df['처방명'].apply(_wrap_pres)
 
-    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 합포여부 → 주소확인
-    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
+    # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 합포여부 → 주소확인 → 조제지시사항(맨 끝, 서술형 긴 텍스트)
+    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인', '조제지시사항']
     cols_order = list(label_df.columns)
     for col in _tail_cols:
         if col in cols_order:
@@ -2394,6 +2407,14 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return True
         if "취소요청건" in clean_text(row.get("처방명_목록추가표시", "")):
             return True
+        # ★ 입원 건은 주소·배송구분과 무관하게 무조건 미발송(CJ 제외) — 반드시 최우선 판정.
+        #   (받는분이 환자 주소여도, 세종점이어도 입원이면 발송 안 함)
+        #   단 오창점은 입원이어도 벌크 발송 → CJ 포함.
+        if "입원" in clean_text(row.get("조제지시사항", "") or ""):
+            for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder", "한의원_구분"]:
+                if "오창" in clean_text(str(row.get(_f, "") or "")):
+                    return False  # 오창점 입원 → 제외 안 함
+            return True
         hospital = clean_text(row.get("한의원명", "") or row.get("보내는분", "") or "")
         delivery_type = clean_text(row.get("배송구분", ""))
         # 고래한방 + 한의원으로 택배 → 벌크 후보. 다만 예외:
@@ -2415,12 +2436,6 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                     return False
             except (ValueError, TypeError):
                 pass
-            return True
-        # 입원 건 제외 (오창점은 입원이어도 벌크 발송 → CJ 포함)
-        if "입원" in clean_text(row.get("조제지시사항", "") or ""):
-            for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder"]:
-                if "오창" in clean_text(str(row.get(_f, "") or "")):
-                    return False  # 오창점 입원 → 제외 안 함
             return True
         return False
 
