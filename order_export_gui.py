@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.85"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.86"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -340,10 +340,13 @@ def _do_update(parent):
     def _finish_ok():
         # 메인스레드: 교체 배치 작성 → 실행 → 종료
         try:
+            # 덮어쓴 직후 바로 실행하면 onefile exe 가 python DLL 추출에 실패할 수 있음
+            # (윈도우/백신이 새 파일을 아직 검사 중). move 후 충분히 대기 후 실행.
             bat_lines = [
                 "@echo off",
-                "ping 127.0.0.1 -n 3 > nul",
+                "ping 127.0.0.1 -n 4 > nul",          # 기존 프로세스 종료 대기 (~3초)
                 f'move /y "{new_exe}" "{current_exe}"',
+                "ping 127.0.0.1 -n 6 > nul",          # 새 파일 정착·백신 스캔 대기 (~5초)
                 f'start "" "{current_exe}"',
                 'del "%~f0"',
             ]
