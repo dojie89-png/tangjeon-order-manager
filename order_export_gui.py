@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.88"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.89"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2007,13 +2007,21 @@ def export_label_excel(xlsx_path: str):
     inpatient_count = int(excl.sum())
     df = df[~excl].copy()
 
-    # 탕전일자: 주문날짜 컬럼을 parse_order_datetime_obj 로 파싱 후 포맷
-    def to_tangjeon_date(val):
+    # 주문일자: 주문날짜에서 연월일만 발췌 (별도 열)
+    def _ymd_only(val):
         dt = parse_order_datetime_obj(clean_text(str(val or '')))
-        if dt:
-            return dt.strftime('%Y.%m.%d')
-        return ''
-    df['탕전일자'] = df['주문날짜'].apply(to_tangjeon_date)
+        return dt.strftime('%Y.%m.%d') if dt else ''
+    df['주문일자'] = df['주문날짜'].apply(_ymd_only)
+
+    # 탕전일자: 실제 탕전일 = 파일(마스터) 추출일 기준. 모든 행 동일.
+    #   마스터 파일명 앞 타임스탬프(YYYYMMDD)에서 추출, 없으면 오늘 날짜.
+    _ts_m = re.match(r'^(\d{8})', Path(xlsx_path).stem)
+    if _ts_m:
+        _d = _ts_m.group(1)
+        _run_date = f"{_d[:4]}.{_d[4:6]}.{_d[6:8]}"
+    else:
+        _run_date = datetime.now().strftime('%Y.%m.%d')
+    df['탕전일자'] = _run_date
 
     df['용량'] = df['팩수'].astype(str) + '팩 / ' + df['파우치용량'].astype(str)
 
@@ -2081,7 +2089,7 @@ def export_label_excel(xlsx_path: str):
     else:
         df['주소확인'] = ''
 
-    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인', '조제지시사항']
+    cols = ['한의원_구분', '환자명', '처방명', '팩수', '파우치용량', '용량', '탕전일자', '주문일자', '복용법', '복용첨부파일', '벌크여부', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인', '조제지시사항']
     label_df = df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
     if '팩수' in label_df.columns:
