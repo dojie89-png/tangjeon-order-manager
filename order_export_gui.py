@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.92"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.93"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2004,13 +2004,13 @@ def export_label_excel(xlsx_path: str):
     df['한의원_구분'] = df.apply(classify_clinic, axis=1)
 
     # 입원 제외 (조제지시사항 또는 복용첨부파일에 '입원' 포함)
-    # 단, 오창점은 입원이어도 벌크 발송 대상 → 제외하지 않음
-    ochang_mask = df['한의원_구분'].astype(str).str.contains('오창', na=False)
+    # 단, 오창점·세종점은 입원이어도 발송 대상 → 제외하지 않음
+    ship_inpatient_mask = df['한의원_구분'].astype(str).str.contains('오창|세종', na=False, regex=True)
 
     excl = pd.Series([False] * len(df), index=df.index)
     for col in ['조제지시사항', '복용첨부파일']:
         if col in df.columns:
-            excl |= df[col].str.contains('입원', na=False) & ~ochang_mask
+            excl |= df[col].str.contains('입원', na=False) & ~ship_inpatient_mask
     inpatient_count = int(excl.sum())
     df = df[~excl].copy()
 
@@ -2440,12 +2440,13 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         if "취소요청건" in clean_text(row.get("처방명_목록추가표시", "")):
             return True
         # ★ 입원 건은 주소·배송구분과 무관하게 무조건 미발송(CJ 제외) — 반드시 최우선 판정.
-        #   (받는분이 환자 주소여도, 세종점이어도 입원이면 발송 안 함)
-        #   단 오창점은 입원이어도 벌크 발송 → CJ 포함.
+        #   (받는분이 환자 주소여도 입원이면 발송 안 함)
+        #   단 오창점·세종점은 입원이어도 발송 → CJ 포함.
         if "입원" in clean_text(row.get("조제지시사항", "") or ""):
             for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder", "한의원_구분"]:
-                if "오창" in clean_text(str(row.get(_f, "") or "")):
-                    return False  # 오창점 입원 → 제외 안 함
+                _v = clean_text(str(row.get(_f, "") or ""))
+                if "오창" in _v or "세종" in _v:
+                    return False  # 오창점·세종점 입원 → 제외 안 함
             return True
         hospital = clean_text(row.get("한의원명", "") or row.get("보내는분", "") or "")
         delivery_type = clean_text(row.get("배송구분", ""))
