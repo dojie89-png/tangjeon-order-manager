@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.95"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.96"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -917,9 +917,7 @@ def get_box_capacity(clinic: str, box_type: str) -> int | None:
     c = clean_text(str(clinic or ""))
     b = clean_text(str(box_type or ""))
     if "고래" in c:
-        if "관저" in c or "판암" in c:
-            return 50
-        return 30  # 세종, 오창 등
+        return 30  # 관저·판암·세종·오창 등 모든 고래 지점 30포 (큰박스 폐지)
     if "본가" in c:
         return 30  # 본가한의원: 박스포장 무관 30포 단위
     if "고급박스2" in b or "고급 박스 2" in b:
