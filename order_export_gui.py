@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.91"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.92"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -1961,6 +1961,8 @@ def export_label_excel(xlsx_path: str):
         return
 
     # 주소 매핑 (고래한방 지점 구분용 — 같은 df에서 추출)
+    # ★ 보내는분(병원)만 사용. 받는분(환자 집) 주소는 지점 판별에서 제외.
+    #   (환자 집이 예: 관저동이면 판암점 주문도 관저로 오분류되던 버그 방지)
     addr_map = {}
     if '주문코드' in df.columns:
         for _, r in df.iterrows():
@@ -1968,7 +1970,7 @@ def export_label_excel(xlsx_path: str):
             if code:
                 parts = [
                     clean_text(str(r.get(c, '') or ''))
-                    for c in ['보내는분', '보내는분_주소', '받는분', '받는분_주소']
+                    for c in ['보내는분', '보내는분_주소']
                 ]
                 addr_map[code] = ' '.join(p for p in parts if p)
 
@@ -1983,10 +1985,15 @@ def export_label_excel(xlsx_path: str):
     def classify_clinic(row):
         clinic = clean_text(str(row.get('한의원명', '') or ''))
         if '고래' in clinic:
+            # 1순위: 회원명(지점 전담 주문자) 매핑이 가장 신뢰도 높음
+            member = clean_text(str(row.get('회원명', '') or ''))
+            if member in GORAE_MEMBER_BRANCH_MAP:
+                return f"고래한방_{GORAE_MEMBER_BRANCH_MAP[member]}"
+            # 2순위: 보내는분(병원) 정보로 판별 (받는분/환자 집 주소는 제외)
             code = clean_text(str(row.get('주문코드', '') or ''))
             search_text = ' '.join(filter(None, [
                 clinic,
-                clean_text(str(row.get('회원명', '') or '')),
+                member,
                 clean_text(str(row.get('발송정보', '') or '')),
                 clean_text(str(row.get('배송정보', '') or '')),
                 addr_map.get(code, ''),
