@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.94"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.95"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -923,7 +923,7 @@ def get_box_capacity(clinic: str, box_type: str) -> int | None:
     if "본가" in c:
         return 30  # 본가한의원: 박스포장 무관 30포 단위
     if "고급박스2" in b or "고급 박스 2" in b:
-        return 50   # 고급박스2도 50포까지 (초과 시 고급박스1처럼 분할)
+        return 60   # 고급박스2는 60포까지 (초과 시 분할). 간혹 안 들어가면 수기 조정
     if "고급박스" in b:  # 고급박스1 또는 "고급박스"만 적힌 경우
         return 50
     return None  # 박스포장 없거나 인식 불가 → 분할 안 함
