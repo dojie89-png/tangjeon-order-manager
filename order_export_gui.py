@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.97"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.98"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3971,9 +3971,21 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
                     current_status = snapshot["status_text"] or current_status
                     log(f"↪ 기존 송장번호 유지, 상태만 확인/전환: {item['ordercode']} {item['patient_name']} / {existing_tracking}")
 
-                if current_status != "발송":
-                    change_order_status(driver, html_text, item["url"], "5")
-                    verify_order_status(driver, item["url"], "5")
+                # 발송(5) 상태 보장 — 읽은 상태가 부정확해도 확실히 전환되도록 재시도.
+                #   (간헐적으로 송장만 입력되고 접수대기로 남던 문제 방지)
+                _shipped = False
+                for _attempt in range(3):
+                    snap = fetch_order_snapshot(driver, item["url"])
+                    if snap["status_value"] == "5":
+                        _shipped = True
+                        break
+                    # 매 시도마다 최신 html(송장 포함) 로 발송 전환 재시도
+                    change_order_status(driver, snap["html_text"], item["url"], "5")
+                    time.sleep(0.8)
+                if not _shipped:
+                    snap = fetch_order_snapshot(driver, item["url"])
+                    if snap["status_value"] != "5":
+                        raise Exception(f"발송 전환 실패 (현재 상태={snap['status_text'] or '-'})")
 
                 success_count += 1
                 log(f"✓ 완료: {item['ordercode']} {item['patient_name']} → {item['tracking']}")
