@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.98"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "13.99"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3684,8 +3684,12 @@ DELIVERY_TARGET_STATUSES = ["접수대기", "입금대기", "조제중", "탕전
 
 
 def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str = "", log_callback=None, progress_callback=None, cancel_check=None):
+    _log_lines: list = []
+    _run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     def log(msg):
         print(msg)
+        _log_lines.append(str(msg))
         if log_callback:
             log_callback(msg)
 
@@ -3997,6 +4001,18 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
         log(f"\n완료: 성공 {success_count}건 / 실패 {fail_count}건 / 스킵 {len(skipped)}건")
 
     finally:
+        # 실행 로그를 대한통운 파일과 같은 폴더에 저장 (발송 문제 원인 추적용)
+        try:
+            _log_dir = os.path.dirname(os.path.abspath(detail_excel_path))
+            _log_path = os.path.join(_log_dir, f"{_run_ts}_송장입력_발송로그.txt")
+            with open(_log_path, "w", encoding="utf-8") as _lf:
+                _lf.write(f"송장 입력·발송 처리 로그 (v{APP_VERSION})  {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+                _lf.write("=" * 55 + "\n")
+                _lf.write("\n".join(_log_lines) + "\n")
+            if log_callback:
+                log_callback(f"\n📄 로그 저장됨: {_log_path}")
+        except Exception as _le:
+            print(f"로그 저장 실패: {_le}")
         try:
             if driver:
                 driver.quit()
