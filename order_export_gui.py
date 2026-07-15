@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "13.99"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "14.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -1896,6 +1896,11 @@ def insert_delivery_no(driver, html_text: str, href: str, delivery_no: str) -> N
         f"?seqno={seqno}&page=&s_date=&e_date=&search=&s_string=&order_ings="
     )
     cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
+    # order_ing: selected 속성 없으면 첫 옵션값(브라우저 기본 제출값), 그래도 없으면 발송(5).
+    #   빈 값("")을 POST 하면 상태가 깨져(필터에 안 잡히는 유령 상태) 발송 처리가 안 됨 → 방지.
+    _oi_sel = soup.find("select", attrs={"name": "order_ing"})
+    _oi_opt = (_oi_sel.find("option", selected=True) or _oi_sel.find("option")) if _oi_sel else None
+    _order_ing = (clean_text(_oi_opt.get("value", "")) if _oi_opt else "") or "5"
     payload = {
         "ordercode": get_input_value(soup, "ordercode"),
         "handphone": get_input_value(soup, "handphone"),
@@ -1903,7 +1908,7 @@ def insert_delivery_no(driver, html_text: str, href: str, delivery_no: str) -> N
         "han_name": "",
         "payment": get_selected_option_value(soup, "payment"),
         "cash_bill": get_selected_option_value(soup, "cash_bill"),
-        "order_ing": get_selected_option_value(soup, "order_ing"),
+        "order_ing": _order_ing,
         "tak_sel": get_selected_option_value(soup, "tak_sel"),
         "delivery_no": delivery_no,
         "realprice_memo": get_textarea_value(soup, "realprice_memo"),
