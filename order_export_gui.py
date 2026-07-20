@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "14.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "14.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4553,6 +4553,18 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
                         WebDriverWait(driver, 10).until(
                             EC.presence_of_element_located((By.NAME, "order_ing"))
                         )
+                        # 페이지 JS 로딩 완료 대기 — order_change() 정의 전에 제출하면
+                        # fallback submit 이 걸려 상태가 저장되지 않음 (매번 1차 실패 원인)
+                        try:
+                            WebDriverWait(driver, 8).until(
+                                lambda d: d.execute_script(
+                                    "return document.readyState === 'complete' "
+                                    "&& typeof order_change === 'function';"
+                                )
+                            )
+                        except Exception:
+                            time.sleep(1.0)
+
                         sel_el = driver.find_element(By.NAME, "order_ing")
                         sel_obj = Select(sel_el)
 
