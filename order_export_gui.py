@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "14.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "14.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4520,6 +4520,24 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
         fail_count = 0
         skip_count = 0
 
+        def _recover_if_session_expired(err) -> bool:
+            """'관리자 로그인 후에 사용' 알럿 = 세션 만료. 알럿 닫고 재로그인.
+            복구 성공 시 True (다음 건부터 정상 처리)."""
+            _m = str(err)
+            if "관리자 로그인" not in _m and "unexpected alert" not in _m:
+                return False
+            try:
+                driver.switch_to.alert.accept()
+            except Exception:
+                pass
+            try:
+                login_driver(driver, ADMIN_ID, ADMIN_PW)
+                log("↻ 세션 만료 감지 → 재로그인 완료 (이후 건 정상 처리)")
+                return True
+            except Exception as _le:
+                log(f"✗ 재로그인 실패: {_le}")
+                return False
+
         for i, order in enumerate(shipped_orders):
             if cancel_check and cancel_check():
                 log("⛔ 취소됨")
@@ -4606,6 +4624,7 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
                             pass
 
                     except Exception as se:
+                        _recover_if_session_expired(se)
                         log(f"✗ 상태 전환 실패 ({order['ordercode']}): {se}")
                         fail_count += 1
                         continue
@@ -4617,6 +4636,7 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
                     log(f"- 배송중: {order['ordercode']} {order['patient']} (송장: {order['tracking']})")
 
             except Exception as e:
+                _recover_if_session_expired(e)
                 fail_count += 1
                 log(f"✗ 실패: {order['ordercode']} {order['patient']} → {e}")
 
