@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "14.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "14.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4608,6 +4608,17 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
                             WebDriverWait(driver, 8).until(
                                 EC.presence_of_element_located((By.NAME, "order_ing"))
                             )
+                            # JS 로딩 완료 대기 — 드롭다운은 JS 로 상태값이 설정되므로
+                            # 그 전에 읽으면 기본값(접수대기)이 읽혀 오검증(불필요한 재시도) 발생
+                            try:
+                                WebDriverWait(driver, 8).until(
+                                    lambda d: d.execute_script(
+                                        "return document.readyState === 'complete' "
+                                        "&& typeof order_change === 'function';"
+                                    )
+                                )
+                            except Exception:
+                                time.sleep(1.0)
                             after_val = Select(driver.find_element(By.NAME, "order_ing")).first_selected_option.text.strip()
                             if after_val != "완료":
                                 log(f"⚠ 상태 검증 실패 ({order['ordercode']}): 제출 후 상태={after_val} (이전={before_val}) → 재시도")
