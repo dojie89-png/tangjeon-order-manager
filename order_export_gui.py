@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "14.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "14.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2417,6 +2417,12 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         if not _is_valid_phone(sender_phone):
             sender_phone = original_sender_phone if _is_valid_phone(original_sender_phone) else ""
         receiver_name = 받는분_override if 받는분_override else clean_text(base_row.get("받는분", ""))
+        # 배송메세지1: 기본은 배송시메모. 성동필한방병원은 폭우 반송 안내 문구 추가.
+        _delivery_msg = clean_text(base_row.get("배송시메모", ""))
+        _hosp_c = clean_text(base_row.get("한의원명", "") or base_row.get("보내는분", ""))
+        if "성동필" in _hosp_c:
+            _reship_note = "폭우로 인해 박스가 젖을 경우 금산으로 반송 부탁드립니다."
+            _delivery_msg = f"{_delivery_msg} {_reship_note}".strip() if _delivery_msg else _reship_note
         return [
             format_order_date_only(base_row.get("주문날짜", "")), # A 주문날짜
             ordercode_str,                                       # B 고객주문번호
@@ -2431,7 +2437,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             clean_text(base_row.get("보내는분", "")),             # K 보내는분성명
             sender_phone,                                        # L 보내는분전화번호
             clean_text(base_row.get("보내는분_주소", "")),         # M 보내는분주소
-            clean_text(base_row.get("배송시메모", "")),           # N 배송메세지1
+            _delivery_msg,                                       # N 배송메세지1
             "묶음" if is_bundle else "",                         # O 묶음여부
         ]
 
