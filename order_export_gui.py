@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "14.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "15.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -1794,14 +1794,15 @@ def print_page(print_driver, url: str, expected_ordercode: str = "") -> dict:
             @page {
                 size: A4;
                 margin-top: 30mm;
-                margin-bottom: 10mm;
+                margin-bottom: 5mm;
                 margin-left: 15mm;
                 margin-right: 15mm;
             }
             @media print {
                 html, body {
                     overflow: hidden;
-                    height: 227mm;
+                    /* 하단 여백 10mm→5mm 축소분(5mm)만큼 인쇄영역 확대 (227→232mm) */
+                    height: 232mm;
                 }
             }
         `;
