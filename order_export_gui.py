@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "14.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "14.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -899,11 +899,27 @@ def build_hospital_folder_name(hospital_name: str, address: str, member_name: st
     return sanitize_filename(hospital_name_clean)
 
 
-# ---------- 입원 판정 ----------
+# ---------- 입원/보류(입금대기·미발송) 판정 ----------
+# 입금대기 전환 + 미발송 대상 키워드
+#   - "입원"     : 고래한방병원 전 지점
+#   - "원내분출" : 고래 세종점만
+def is_hold_note(hospital_text: str, dispensing_note: str) -> bool:
+    """조제지시사항이 입금대기·미발송 대상인지 판정 (한의원 텍스트는 폴더명/한의원명 등 무엇이든 가능)."""
+    h = clean_text(hospital_text)
+    n = clean_text(dispensing_note)
+    if "입원" in n:
+        return True
+    if "원내분출" in n and "세종" in h:
+        return True
+    return False
+
+
 def is_inpatient_dispense(hospital_folder_name: str, dispensing_note: str) -> bool:
     hospital_folder_name = clean_text(hospital_folder_name)
     dispensing_note = clean_text(dispensing_note)
-    return hospital_folder_name.startswith("고래한방병원_") and "입원" in dispensing_note
+    if not hospital_folder_name.startswith("고래한방병원_"):
+        return False
+    return is_hold_note(hospital_folder_name, dispensing_note)
 
 
 # ---------- 벌크 판정 ----------
@@ -2006,14 +2022,18 @@ def export_label_excel(xlsx_path: str):
 
     df['한의원_구분'] = df.apply(classify_clinic, axis=1)
 
-    # 입원 제외 (조제지시사항 또는 복용첨부파일에 '입원' 포함)
-    # 단, 오창점·세종점은 입원이어도 발송 대상 → 제외하지 않음
-    ship_inpatient_mask = df['한의원_구분'].astype(str).str.contains('오창|세종', na=False, regex=True)
+    # 미발송 제외: '입원'(고래 전 지점) 또는 '원내분출'(세종점만)
+    # 단, 오창점은 입원이어도 발송 대상 → 제외하지 않음 (세종점은 둘 다 미발송)
+    _clinic_s  = df['한의원_구분'].astype(str)
+    _ochang    = _clinic_s.str.contains('오창', na=False)
+    _sejong    = _clinic_s.str.contains('세종', na=False)
 
     excl = pd.Series([False] * len(df), index=df.index)
     for col in ['조제지시사항', '복용첨부파일']:
         if col in df.columns:
-            excl |= df[col].str.contains('입원', na=False) & ~ship_inpatient_mask
+            _s = df[col].astype(str)
+            excl |= _s.str.contains('입원', na=False) & ~_ochang          # 입원: 오창만 발송
+            excl |= _s.str.contains('원내분출', na=False) & _sejong        # 원내분출: 세종만 미발송
     inpatient_count = int(excl.sum())
     df = df[~excl].copy()
 
@@ -2448,14 +2468,16 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return True
         if "취소요청건" in clean_text(row.get("처방명_목록추가표시", "")):
             return True
-        # ★ 입원 건은 주소·배송구분과 무관하게 무조건 미발송(CJ 제외) — 반드시 최우선 판정.
-        #   (받는분이 환자 주소여도 입원이면 발송 안 함)
-        #   단 오창점·세종점은 입원이어도 발송 → CJ 포함.
-        if "입원" in clean_text(row.get("조제지시사항", "") or ""):
-            for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder", "한의원_구분"]:
-                _v = clean_text(str(row.get(_f, "") or ""))
-                if "오창" in _v or "세종" in _v:
-                    return False  # 오창점·세종점 입원 → 제외 안 함
+        # ★ 입원·세종 원내분출 건은 주소·배송구분과 무관하게 무조건 미발송(CJ 제외) — 최우선 판정.
+        #   (받는분이 환자 주소여도 발송 안 함)
+        #   단 오창점은 입원이어도 발송 → CJ 포함. (세종점은 입원·원내분출 모두 미발송)
+        _hosp_text = " ".join(
+            clean_text(str(row.get(_f, "") or ""))
+            for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder", "한의원_구분"]
+        )
+        if is_hold_note(_hosp_text, row.get("조제지시사항", "") or ""):
+            if "오창" in _hosp_text and "입원" in clean_text(row.get("조제지시사항", "") or ""):
+                return False  # 오창점 입원 → 제외 안 함
             return True
         hospital = clean_text(row.get("한의원명", "") or row.get("보내는분", "") or "")
         delivery_type = clean_text(row.get("배송구분", ""))
@@ -3023,8 +3045,9 @@ def run_job(settings: dict, progress_callback=None):
                         msg = f"⚠ 조제지시사항 공란 — 입원 판정 불가 (탕전페이지 취득 실패 가능성): {ordercode} {patient_name}"
                         print(f"    -> {msg}")
 
-                    # 접수대기 → 입금대기 자동 전환 예약 (입원 건)
-                    if settings.get("auto_change_status") and status == "접수대기" and "입원" in dispensing_note:
+                    # 접수대기 → 입금대기 자동 전환 예약 (입원 건 / 세종 원내분출)
+                    if settings.get("auto_change_status") and status == "접수대기" and \
+                            is_hold_note(hospital_folder_name, dispensing_note):
                         pending_status_changes.append({
                             "kind": "inpatient",
                             "href": href,
