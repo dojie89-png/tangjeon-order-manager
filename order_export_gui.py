@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "14.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "14.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -904,12 +904,17 @@ def build_hospital_folder_name(hospital_name: str, address: str, member_name: st
 #   - "입원"     : 고래한방병원 전 지점
 #   - "원내분출" : 고래 세종점만
 def is_hold_note(hospital_text: str, dispensing_note: str) -> bool:
-    """조제지시사항이 입금대기·미발송 대상인지 판정 (한의원 텍스트는 폴더명/한의원명 등 무엇이든 가능)."""
-    h = clean_text(hospital_text)
-    n = clean_text(dispensing_note)
-    if "입원" in n:
+    """조제지시사항이 입금대기·미발송 대상인지 판정 (한의원 텍스트는 폴더명/한의원명 등 무엇이든 가능).
+    표기 흔들림 대응: 공백/탭을 제거하고 비교 → "원내 분출", "원내분출입니다" 모두 인식.
+    단 "원내발송"은 발송 대상이므로 '원내'만으로는 절대 매칭하지 않는다.
+    """
+    h  = clean_text(hospital_text)
+    n  = clean_text(dispensing_note)
+    ns = re.sub(r"\s+", "", n)          # 공백 제거본
+    hs = re.sub(r"\s+", "", h)
+    if "입원" in ns:
         return True
-    if "원내분출" in n and "세종" in h:
+    if "원내분출" in ns and "세종" in hs:
         return True
     return False
 
@@ -2031,7 +2036,9 @@ def export_label_excel(xlsx_path: str):
     excl = pd.Series([False] * len(df), index=df.index)
     for col in ['조제지시사항', '복용첨부파일']:
         if col in df.columns:
-            _s = df[col].astype(str)
+            # 공백 제거 후 비교 — "원내 분출" 같은 표기 흔들림도 인식
+            # ("원내발송"은 발송 대상이므로 '원내분출' 전체 단어로만 매칭)
+            _s = df[col].astype(str).str.replace(r'\s+', '', regex=True)
             excl |= _s.str.contains('입원', na=False) & ~_ochang          # 입원: 오창만 발송
             excl |= _s.str.contains('원내분출', na=False) & _sejong        # 원내분출: 세종만 미발송
     inpatient_count = int(excl.sum())
