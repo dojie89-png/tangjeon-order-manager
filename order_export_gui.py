@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "15.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "15.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4699,6 +4699,181 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
             pass
 
 
+# ---------- 일괄 상태 변경 ----------
+def run_status_scan(start_date: str = "", end_date: str = "",
+                    status_filter: str = "", hospital_filter: str = "",
+                    log_callback=None, progress_callback=None, cancel_check=None) -> list:
+    """기간·현재상태·한의원 조건으로 주문을 조회해 목록 반환 (일괄 상태 변경 대상 선택용)."""
+    def log(msg):
+        print(msg)
+        if log_callback:
+            log_callback(msg)
+
+    def update_progress(pct, msg):
+        if progress_callback:
+            progress_callback(pct, msg)
+
+    driver = None
+    results: list = []
+    try:
+        update_progress(5, "로그인 중...")
+        _opts = Options()
+        _opts.add_argument("--start-maximized")
+        driver = webdriver.Chrome(options=_opts)
+        wait = WebDriverWait(driver, 10)
+        login_driver(driver, ADMIN_ID, ADMIN_PW)
+
+        order_ings = STATUS_VALUE_MAP.get(status_filter, "") if status_filter else ""
+        hospital_keywords = HOSPITAL_SEARCH_MAP.get(hospital_filter, [hospital_filter]) if hospital_filter else []
+        log(f"조회 조건 — 기간: {start_date or '전체'} ~ {end_date or '전체'} / "
+            f"상태: {status_filter or '전체'} / 한의원: {hospital_filter or '전체'}")
+
+        seen = set()
+        for page_no in range(1, MAX_PAGE_SAFETY_LIMIT + 1):
+            if cancel_check and cancel_check():
+                log("⛔ 취소됨")
+                break
+            update_progress(min(90, 10 + page_no * 5), f"{page_no}페이지 조회 중... ({len(results)}건)")
+            driver.get(build_order_list_url(page_no, start_date, end_date, order_ings))
+            time.sleep(1.5)
+
+            detail_rows = collect_detail_links_on_current_page(driver, wait)
+            if not detail_rows:
+                break
+
+            for item in detail_rows:
+                if cancel_check and cancel_check():
+                    break
+                href = item["href"]
+                seqno = extract_seqno_from_detail_url(href)
+                if not seqno or seqno in seen:
+                    continue
+                seen.add(seqno)
+
+                driver.get(href)
+                time.sleep(1.0)
+                md = parse_detail_html(driver.page_source, href)
+
+                # 한의원 필터 (부분 일치, 주소·회원명까지 포함해 검사)
+                if hospital_keywords:
+                    haystack = clean_text(" ".join([
+                        str(md.get("한의원명", "") or ""), str(md.get("보내는분", "") or ""),
+                        str(md.get("보내는분_주소", "") or ""), str(md.get("회원명", "") or ""),
+                        str(item.get("row_text", "") or ""),
+                    ]))
+                    if not all(kw in haystack for kw in hospital_keywords):
+                        continue
+
+                results.append({
+                    "seqno": seqno,
+                    "href": href,
+                    "ordercode": clean_text(md.get("주문코드", "")),
+                    "patient": clean_text(md.get("환자명", "")),
+                    "hospital": clean_text(md.get("한의원명", "") or md.get("보내는분", "")),
+                    "order_date": clean_text(md.get("주문날짜", "")),
+                    "status": clean_text(md.get("진행상태", "")),
+                })
+            log(f"{page_no}페이지 누적 {len(results)}건")
+
+        update_progress(100, f"조회 완료 — {len(results)}건")
+        log(f"\n조회 완료: {len(results)}건")
+        return results
+    except Exception as e:
+        log(f"✗ 조회 실패: {e}")
+        update_progress(100, f"오류: {e}")
+        return results
+    finally:
+        try:
+            if driver:
+                driver.quit()
+        except Exception:
+            pass
+
+
+def run_bulk_status_change(orders: list, target_status: str,
+                           log_callback=None, progress_callback=None, cancel_check=None) -> dict:
+    """선택된 주문들의 진행상태를 target_status 로 일괄 변경."""
+    def log(msg):
+        print(msg)
+        if log_callback:
+            log_callback(msg)
+
+    def update_progress(pct, msg):
+        if progress_callback:
+            progress_callback(pct, msg)
+
+    target_value = STATUS_VALUE_MAP.get(target_status, "")
+    if not target_value:
+        log(f"✗ 알 수 없는 상태: {target_status}")
+        return {"success": 0, "skip": 0, "fail": 0}
+
+    driver = None
+    success = skip = fail = 0
+    try:
+        update_progress(5, "로그인 중...")
+        _opts = Options()
+        _opts.add_argument("--start-maximized")
+        driver = webdriver.Chrome(options=_opts)
+        login_driver(driver, ADMIN_ID, ADMIN_PW)
+        log(f"일괄 변경 시작 — 대상 {len(orders)}건 → '{target_status}'")
+
+        for i, o in enumerate(orders):
+            if cancel_check and cancel_check():
+                log("⛔ 취소됨")
+                break
+            update_progress(10 + int(85 * (i + 1) / max(len(orders), 1)),
+                            f"상태 변경 중... ({i+1}/{len(orders)})")
+            label = f"{o.get('ordercode', '')} {o.get('patient', '')}"
+            try:
+                snap = fetch_order_snapshot(driver, o["href"])
+                if snap["status_value"] == target_value:
+                    skip += 1
+                    log(f"- 스킵 (이미 {target_status}): {label}")
+                    continue
+
+                before = snap["status_text"] or "-"
+                change_order_status(driver, snap["html_text"], o["href"], target_value)
+                time.sleep(0.6)
+
+                after = fetch_order_snapshot(driver, o["href"])
+                if after["status_value"] != target_value:
+                    # 1회 재시도
+                    change_order_status(driver, after["html_text"], o["href"], target_value)
+                    time.sleep(0.8)
+                    after = fetch_order_snapshot(driver, o["href"])
+                if after["status_value"] == target_value:
+                    success += 1
+                    log(f"✓ {before} → {target_status}: {label}")
+                else:
+                    fail += 1
+                    log(f"✗ 실패 (현재={after['status_text'] or '-'}): {label}")
+            except Exception as e:
+                # 세션 만료 시 재로그인 후 다음 건부터 정상 처리
+                _msg = str(e)
+                if "관리자 로그인" in _msg or "unexpected alert" in _msg:
+                    try:
+                        driver.switch_to.alert.accept()
+                    except Exception:
+                        pass
+                    try:
+                        login_driver(driver, ADMIN_ID, ADMIN_PW)
+                        log("↻ 세션 만료 감지 → 재로그인 완료")
+                    except Exception as le:
+                        log(f"✗ 재로그인 실패: {le}")
+                fail += 1
+                log(f"✗ 실패: {label} → {e}")
+
+        update_progress(100, "완료")
+        log(f"\n완료: 변경 {success}건 / 스킵 {skip}건 / 실패 {fail}건")
+        return {"success": success, "skip": skip, "fail": fail}
+    finally:
+        try:
+            if driver:
+                driver.quit()
+        except Exception:
+            pass
+
+
 # ---------- 약속처방주문관리 ----------
 
 def _parse_shop_order_list_page(html: str) -> list:
@@ -9139,6 +9314,269 @@ def launch_gui():
         threading.Thread(target=run_thread, daemon=True).start()
 
     sp_run_btn.config(command=on_sp_run)
+
+    # ===== 탭 5: 일괄 상태 변경 =====
+    tab5 = ttk.Frame(notebook, padding=12)
+    notebook.add(tab5, text="일괄 상태 변경")
+    tab5.columnconfigure(0, weight=1)
+    tab5.rowconfigure(3, weight=1)
+
+    # ── 조회 조건 ──
+    b_cond_lf = ttk.LabelFrame(tab5, text="조회 조건", padding=(8, 6))
+    b_cond_lf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    b_cond_lf.columnconfigure(1, weight=1)
+    b_cond_lf.columnconfigure(3, weight=1)
+
+    ttk.Label(b_cond_lf, text="시작").grid(row=0, column=0, sticky="w", padx=(0, 6))
+    b_start_entry = tk.Entry(b_cond_lf, width=12, justify="center", **_ENTRY_KW)
+    b_start_entry.grid(row=0, column=1, sticky="ew", ipady=2)
+    ttk.Label(b_cond_lf, text="종료").grid(row=0, column=2, sticky="w", padx=(8, 6))
+    b_end_entry = tk.Entry(b_cond_lf, width=12, justify="center", **_ENTRY_KW)
+    b_end_entry.grid(row=0, column=3, sticky="ew", ipady=2)
+    _ph_add(b_start_entry, "YYYY-MM-DD")
+    _ph_add(b_end_entry,   "YYYY-MM-DD")
+
+    def b_set_today():
+        t = datetime.today().strftime("%Y-%m-%d")
+        _ph_set_date(b_start_entry, t); _ph_set_date(b_end_entry, t)
+
+    def b_set_yesterday():
+        d = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        _ph_set_date(b_start_entry, d); _ph_set_date(b_end_entry, d)
+
+    def b_set_this_month():
+        t = datetime.today()
+        first = t.replace(day=1).strftime("%Y-%m-%d")
+        last = (t.replace(year=t.year + 1, month=1, day=1) if t.month == 12
+                else t.replace(month=t.month + 1, day=1)) - timedelta(days=1)
+        _ph_set_date(b_start_entry, first); _ph_set_date(b_end_entry, last.strftime("%Y-%m-%d"))
+
+    def b_clear_dates():
+        for e in (b_start_entry, b_end_entry):
+            e.delete(0, tk.END); e.insert(0, _ph_map[e]); e.config(fg=_PH_COLOR)
+
+    b_date_btns = ttk.Frame(b_cond_lf)
+    b_date_btns.grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
+    ttk.Button(b_date_btns, text="오늘",   command=b_set_today,      width=6).pack(side="left", padx=(0, 3))
+    ttk.Button(b_date_btns, text="어제",   command=b_set_yesterday,  width=6).pack(side="left", padx=3)
+    ttk.Button(b_date_btns, text="이번달", command=b_set_this_month, width=6).pack(side="left", padx=3)
+    ttk.Button(b_date_btns, text="초기화", command=b_clear_dates,    width=6).pack(side="left", padx=3)
+
+    ttk.Label(b_cond_lf, text="한의원").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
+    b_hospital_var = tk.StringVar(value="")
+    ttk.Combobox(b_cond_lf, textvariable=b_hospital_var,
+                 values=HOSPITAL_PRESETS, state="normal", width=12).grid(
+        row=2, column=1, sticky="ew", pady=(6, 0))
+    ttk.Label(b_cond_lf, text="현재 상태").grid(row=2, column=2, sticky="w", padx=(8, 6), pady=(6, 0))
+    b_cur_status_var = tk.StringVar(value="")
+    ttk.Combobox(b_cond_lf, textvariable=b_cur_status_var,
+                 values=[""] + ALL_STATUSES, state="readonly", width=10).grid(
+        row=2, column=3, sticky="ew", pady=(6, 0))
+
+    b_scan_cancel_event = threading.Event()
+    b_scan_frame = ttk.Frame(b_cond_lf)
+    b_scan_frame.grid(row=3, column=0, columnspan=4, sticky="e", pady=(6, 0))
+    b_scan_cancel_btn = ttk.Button(b_scan_frame, text="취소", state="disabled", width=6,
+                                   command=lambda: b_scan_cancel_event.set())
+    b_scan_cancel_btn.pack(side="right", padx=(3, 0))
+    b_scan_btn = ttk.Button(b_scan_frame, text="조회", width=8)
+    b_scan_btn.pack(side="right")
+
+    # ── 조회 결과 목록 (체크박스 선택) ──
+    b_list_lf = ttk.LabelFrame(tab5, text="조회 결과 (클릭하여 선택)", padding=(8, 6))
+    b_list_lf.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
+    b_list_lf.columnconfigure(0, weight=1)
+    b_list_lf.rowconfigure(0, weight=1)
+    tab5.rowconfigure(1, weight=1)
+
+    b_tree = ttk.Treeview(b_list_lf, columns=("chk", "code", "patient", "hosp", "date", "status"),
+                          show="headings", height=10, selectmode="none")
+    # 창 폭(540px)에 맞춘 컬럼 폭 — 한의원 열만 남는 폭을 흡수
+    for _c, _t, _w, _a in [("chk", "선택", 34, "center"), ("code", "주문번호", 104, "center"),
+                           ("patient", "환자명", 62, "center"), ("hosp", "한의원", 96, "w"),
+                           ("date", "주문일", 76, "center"), ("status", "현재상태", 62, "center")]:
+        b_tree.heading(_c, text=_t)
+        b_tree.column(_c, width=_w, minwidth=_w, anchor=_a, stretch=(_c == "hosp"))
+    b_tree.grid(row=0, column=0, sticky="nsew")
+    b_tree_scroll = ttk.Scrollbar(b_list_lf, orient="vertical", command=b_tree.yview)
+    b_tree_scroll.grid(row=0, column=1, sticky="ns")
+    b_tree.config(yscrollcommand=b_tree_scroll.set)
+
+    b_scan_results: list = []      # 조회 결과 원본
+    b_checked: set = set()         # 체크된 iid
+
+    def _b_refresh_count():
+        b_count_label.config(text=f"전체 {len(b_scan_results)}건 / 선택 {len(b_checked)}건")
+
+    def _b_set_check(iid, on: bool):
+        if on:
+            b_checked.add(iid)
+        else:
+            b_checked.discard(iid)
+        vals = list(b_tree.item(iid, "values"))
+        vals[0] = "☑" if on else "☐"
+        b_tree.item(iid, values=vals)
+
+    def _b_on_click(event):
+        iid = b_tree.identify_row(event.y)
+        if iid:
+            _b_set_check(iid, iid not in b_checked)
+            _b_refresh_count()
+
+    b_tree.bind("<Button-1>", _b_on_click)
+
+    b_sel_frame = ttk.Frame(b_list_lf)
+    b_sel_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+    ttk.Button(b_sel_frame, text="전체선택", width=9,
+               command=lambda: ([_b_set_check(i, True) for i in b_tree.get_children()], _b_refresh_count())
+               ).pack(side="left")
+    ttk.Button(b_sel_frame, text="전체해제", width=9,
+               command=lambda: ([_b_set_check(i, False) for i in b_tree.get_children()], _b_refresh_count())
+               ).pack(side="left", padx=(4, 0))
+    b_count_label = ttk.Label(b_sel_frame, text="전체 0건 / 선택 0건")
+    b_count_label.pack(side="right")
+
+    # ── 변경 실행 ──
+    b_apply_lf = ttk.LabelFrame(tab5, text="일괄 변경", padding=(8, 6))
+    b_apply_lf.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+    b_apply_lf.columnconfigure(1, weight=1)
+    ttk.Label(b_apply_lf, text="변경할 상태").grid(row=0, column=0, sticky="w", padx=(0, 6))
+    b_target_status_var = tk.StringVar(value="")
+    ttk.Combobox(b_apply_lf, textvariable=b_target_status_var,
+                 values=ALL_STATUSES, state="readonly", width=14).grid(row=0, column=1, sticky="w")
+    b_apply_cancel_event = threading.Event()
+    b_apply_cancel_btn = ttk.Button(b_apply_lf, text="취소", state="disabled", width=6,
+                                    command=lambda: b_apply_cancel_event.set())
+    b_apply_cancel_btn.grid(row=0, column=3, padx=(4, 0))
+    b_apply_btn = ttk.Button(b_apply_lf, text="일괄 변경", width=10)
+    b_apply_btn.grid(row=0, column=2)
+
+    b_status_label = ttk.Label(tab5, text="대기 중", foreground="blue")
+    b_status_label.grid(row=4, column=0, sticky="w", pady=(2, 2))
+    b_progress_var = tk.IntVar(value=0)
+    ttk.Progressbar(tab5, orient="horizontal", mode="determinate",
+                    maximum=100, variable=b_progress_var).grid(row=5, column=0, sticky="ew", pady=(0, 6))
+
+    b_log_text = tk.Text(tab5, height=7, width=48, state="disabled", font=("Malgun Gothic", 9))
+    b_log_text.grid(row=6, column=0, sticky="ew")
+
+    def b_log(msg):
+        def _do():
+            b_log_text.config(state="normal")
+            b_log_text.insert("end", str(msg) + "\n")
+            b_log_text.see("end")
+            b_log_text.config(state="disabled")
+        root.after(0, _do)
+
+    def b_progress(pct, msg):
+        root.after(0, lambda p=pct: b_progress_var.set(p))
+        root.after(0, lambda m=msg: b_status_label.config(text=m))
+
+    # ── 조회 실행 ──
+    def on_b_scan():
+        if _global_running.is_set():
+            messagebox.showwarning("실행 중", "다른 작업이 실행 중입니다.\n완료 후 다시 시도해주세요.")
+            return
+        if not ensure_admin_credentials(root):
+            return
+        try:
+            s_date = normalize_date_input(_ph_get(b_start_entry))
+            e_date = normalize_date_input(_ph_get(b_end_entry))
+        except ValueError as ex:
+            messagebox.showerror("입력 오류", str(ex))
+            return
+        if not s_date and not e_date and not b_hospital_var.get().strip():
+            if not messagebox.askyesno("전체 조회 확인",
+                                       "기간·한의원 조건이 없습니다. 전체를 조회하면 오래 걸릴 수 있어요.\n계속할까요?"):
+                return
+
+        b_scan_cancel_event.clear()
+        _global_running.set()
+        b_scan_btn.config(state="disabled")
+        b_scan_cancel_btn.config(state="normal")
+        b_apply_btn.config(state="disabled")
+        b_tree.delete(*b_tree.get_children())
+        b_scan_results.clear(); b_checked.clear(); _b_refresh_count()
+
+        def worker():
+            try:
+                rows = run_status_scan(
+                    s_date, e_date,
+                    b_cur_status_var.get().strip(), b_hospital_var.get().strip(),
+                    log_callback=b_log, progress_callback=b_progress,
+                    cancel_check=lambda: b_scan_cancel_event.is_set(),
+                )
+
+                def fill():
+                    b_scan_results.extend(rows)
+                    for r in rows:
+                        b_tree.insert("", "end", values=(
+                            "☐", r["ordercode"], r["patient"], r["hospital"],
+                            format_order_date_only(r["order_date"]), r["status"],
+                        ))
+                    _b_refresh_count()
+                root.after(0, fill)
+            except Exception as ex:
+                root.after(0, lambda m=str(ex): messagebox.showerror("조회 실패", m))
+            finally:
+                _global_running.clear()
+                root.after(0, lambda: b_scan_btn.config(state="normal"))
+                root.after(0, lambda: b_scan_cancel_btn.config(state="disabled"))
+                root.after(0, lambda: b_apply_btn.config(state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    b_scan_btn.config(command=on_b_scan)
+
+    # ── 일괄 변경 실행 ──
+    def on_b_apply():
+        if _global_running.is_set():
+            messagebox.showwarning("실행 중", "다른 작업이 실행 중입니다.\n완료 후 다시 시도해주세요.")
+            return
+        target = b_target_status_var.get().strip()
+        if not target:
+            messagebox.showwarning("상태 선택", "변경할 상태를 선택해주세요.")
+            return
+        children = b_tree.get_children()
+        targets = [b_scan_results[i] for i, iid in enumerate(children) if iid in b_checked]
+        if not targets:
+            messagebox.showwarning("선택 없음", "변경할 주문을 선택해주세요.")
+            return
+        if not messagebox.askyesno(
+            "일괄 변경 확인",
+            f"선택한 {len(targets)}건의 진행상태를 '{target}'(으)로 변경합니다.\n\n"
+            f"되돌리려면 다시 일괄 변경해야 합니다. 진행할까요?"
+        ):
+            return
+
+        b_apply_cancel_event.clear()
+        _global_running.set()
+        b_apply_btn.config(state="disabled")
+        b_apply_cancel_btn.config(state="normal")
+        b_scan_btn.config(state="disabled")
+
+        def worker():
+            try:
+                res = run_bulk_status_change(
+                    targets, target,
+                    log_callback=b_log, progress_callback=b_progress,
+                    cancel_check=lambda: b_apply_cancel_event.is_set(),
+                )
+                root.after(0, lambda r=res: messagebox.showinfo(
+                    "일괄 변경 완료",
+                    f"변경 {r['success']}건 / 스킵 {r['skip']}건 / 실패 {r['fail']}건\n\n"
+                    "목록을 최신화하려면 다시 [조회]를 눌러주세요."))
+            except Exception as ex:
+                root.after(0, lambda m=str(ex): messagebox.showerror("일괄 변경 실패", m))
+            finally:
+                _global_running.clear()
+                root.after(0, lambda: b_apply_btn.config(state="normal"))
+                root.after(0, lambda: b_apply_cancel_btn.config(state="disabled"))
+                root.after(0, lambda: b_scan_btn.config(state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    b_apply_btn.config(command=on_b_apply)
 
     # 앱 시작 2초 후 업데이트 체크 (UI 로딩 완료 후 실행)
     root.after(2000, lambda: check_and_prompt_update(root))
