@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "15.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "15.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -901,12 +901,17 @@ def build_hospital_folder_name(hospital_name: str, address: str, member_name: st
 
 # ---------- 입원/보류(입금대기·미발송) 판정 ----------
 # 입금대기 전환 + 미발송 대상 키워드
-#   - "입원"     : 고래한방병원 전 지점
+#   - "입원"     : 고래한방병원 전 지점 (단 오창·세종점은 발송 예외 — 아래 사용처 참고)
 #   - "원내분출" : 고래 세종점만
+#
+# 원내분출 오타·표기 변형 대응 정규식.
+#   분출 / 불출 / 분줄 / 불줄 을 모두 인식 (실무에선 '불출'도 자주 씀).
+#   ★ "원내발송"은 발송 대상이므로 '원내'만으로는 절대 매칭하지 않는다.
+HOLD_INTERNAL_RE = re.compile(r"원내[분불][출줄]")
+
 def is_hold_note(hospital_text: str, dispensing_note: str) -> bool:
     """조제지시사항이 입금대기·미발송 대상인지 판정 (한의원 텍스트는 폴더명/한의원명 등 무엇이든 가능).
-    표기 흔들림 대응: 공백/탭을 제거하고 비교 → "원내 분출", "원내분출입니다" 모두 인식.
-    단 "원내발송"은 발송 대상이므로 '원내'만으로는 절대 매칭하지 않는다.
+    표기 흔들림 대응: 공백/탭을 제거하고 비교 → "원내 분출", "원내불출입니다" 모두 인식.
     """
     h  = clean_text(hospital_text)
     n  = clean_text(dispensing_note)
@@ -914,7 +919,7 @@ def is_hold_note(hospital_text: str, dispensing_note: str) -> bool:
     hs = re.sub(r"\s+", "", h)
     if "입원" in ns:
         return True
-    if "원내분출" in ns and "세종" in hs:
+    if HOLD_INTERNAL_RE.search(ns) and "세종" in hs:
         return True
     return False
 
@@ -2029,19 +2034,20 @@ def export_label_excel(xlsx_path: str):
     df['한의원_구분'] = df.apply(classify_clinic, axis=1)
 
     # 미발송 제외: '입원'(고래 전 지점) 또는 '원내분출'(세종점만)
-    # 단, 오창점은 입원이어도 발송 대상 → 제외하지 않음 (세종점은 둘 다 미발송)
+    # 단, 오창점·세종점은 입원이어도 발송 대상 → 제외하지 않음
+    # (세종점의 '원내분출'만 예외 없이 미발송)
     _clinic_s  = df['한의원_구분'].astype(str)
-    _ochang    = _clinic_s.str.contains('오창', na=False)
+    _ship_inpatient = _clinic_s.str.contains('오창|세종', na=False, regex=True)
     _sejong    = _clinic_s.str.contains('세종', na=False)
 
     excl = pd.Series([False] * len(df), index=df.index)
     for col in ['조제지시사항', '복용첨부파일']:
         if col in df.columns:
             # 공백 제거 후 비교 — "원내 분출" 같은 표기 흔들림도 인식
-            # ("원내발송"은 발송 대상이므로 '원내분출' 전체 단어로만 매칭)
+            # 분출/불출/분줄/불줄 오타 허용. ("원내발송"은 발송 대상이라 매칭 안 됨)
             _s = df[col].astype(str).str.replace(r'\s+', '', regex=True)
-            excl |= _s.str.contains('입원', na=False) & ~_ochang          # 입원: 오창만 발송
-            excl |= _s.str.contains('원내분출', na=False) & _sejong        # 원내분출: 세종만 미발송
+            excl |= _s.str.contains('입원', na=False) & ~_ship_inpatient          # 입원: 오창·세종은 발송
+            excl |= _s.str.contains(HOLD_INTERNAL_RE.pattern, na=False, regex=True) & _sejong
     inpatient_count = int(excl.sum())
     df = df[~excl].copy()
 
@@ -2478,14 +2484,16 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return True
         # ★ 입원·세종 원내분출 건은 주소·배송구분과 무관하게 무조건 미발송(CJ 제외) — 최우선 판정.
         #   (받는분이 환자 주소여도 발송 안 함)
-        #   단 오창점은 입원이어도 발송 → CJ 포함. (세종점은 입원·원내분출 모두 미발송)
+        #   단 오창점·세종점은 "입원"이어도 발송 → CJ 포함.
+        #   세종점 "원내분출"은 예외 없이 미발송.
         _hosp_text = " ".join(
             clean_text(str(row.get(_f, "") or ""))
             for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder", "한의원_구분"]
         )
-        if is_hold_note(_hosp_text, row.get("조제지시사항", "") or ""):
-            if "오창" in _hosp_text and "입원" in clean_text(row.get("조제지시사항", "") or ""):
-                return False  # 오창점 입원 → 제외 안 함
+        _note = clean_text(row.get("조제지시사항", "") or "")
+        if is_hold_note(_hosp_text, _note):
+            if ("오창" in _hosp_text or "세종" in _hosp_text) and "입원" in re.sub(r"\s+", "", _note):
+                return False  # 오창점·세종점 입원 → 제외 안 함 (발송)
             return True
         hospital = clean_text(row.get("한의원명", "") or row.get("보내는분", "") or "")
         delivery_type = clean_text(row.get("배송구분", ""))
