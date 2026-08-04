@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "15.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "15.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4731,9 +4731,13 @@ def run_status_scan(start_date: str = "", end_date: str = "",
         search_keywords = [clean_text(p) for p in re.split(r"[,，]", clean_text(search_filter or "")) if clean_text(p)]
         search_member  = search_target in ("주문자명", "주문자명+환자명")
         search_patient = search_target in ("환자명(복용자)", "주문자명+환자명")
+        # 시간까지 입력된 경우 클라이언트에서 추가 필터 (URL 은 날짜만 지원)
+        filter_start_dt = parse_filter_datetime(start_date)
+        filter_end_dt = parse_filter_datetime(end_date)
         log(f"조회 조건 — 기간: {start_date or '전체'} ~ {end_date or '전체'} / "
             f"상태: {status_filter or '전체'} / 한의원: {hospital_filter or '전체'}"
             + (f" / {search_target}: {search_filter}" if search_keywords else ""))
+        excluded = 0
 
         seen = set()
         for page_no in range(1, MAX_PAGE_SAFETY_LIMIT + 1):
@@ -4761,15 +4765,34 @@ def run_status_scan(start_date: str = "", end_date: str = "",
                 time.sleep(1.0)
                 md = parse_detail_html(driver.page_source, href)
 
-                # 한의원 필터 (부분 일치, 주소·회원명까지 포함해 검사)
+                # 한의원 필터 — 탕전주문 조회 탭과 동일한 판정 재료 사용.
+                #   회원명→지점 매핑(정재희=관저 등)과 받는분 주소까지 포함해야
+                #   보내는분 주소에 지점명이 없는 건도 누락되지 않음.
                 if hospital_keywords:
+                    _cur_member = clean_text(str(md.get("회원명", "") or ""))
                     haystack = clean_text(" ".join([
-                        str(md.get("한의원명", "") or ""), str(md.get("보내는분", "") or ""),
-                        str(md.get("보내는분_주소", "") or ""), str(md.get("회원명", "") or ""),
+                        str(md.get("한의원명", "") or ""),
+                        str(md.get("보내는분", "") or ""),
+                        str(md.get("보내는분_주소", "") or ""),
+                        str(md.get("받는분_주소", "") or ""),
+                        _cur_member,
+                        GORAE_MEMBER_BRANCH_MAP.get(_cur_member, ""),
                         str(item.get("row_text", "") or ""),
                     ]))
                     if not all(kw in haystack for kw in hospital_keywords):
+                        excluded += 1
                         continue
+
+                # 시간 필터 (시작/종료에 시간까지 입력한 경우)
+                if filter_start_dt or filter_end_dt:
+                    _odt = parse_order_datetime_obj(md.get("주문날짜", ""))
+                    if _odt:
+                        if filter_start_dt and _odt < filter_start_dt:
+                            excluded += 1
+                            continue
+                        if filter_end_dt and _odt > filter_end_dt:
+                            excluded += 1
+                            continue
 
                 # 주문자/수취인(환자명) 검색 필터
                 if search_keywords:
@@ -4780,6 +4803,7 @@ def run_status_scan(start_date: str = "", end_date: str = "",
                     _hit = (search_member and any(kw in _member for kw in search_keywords)) or \
                            (search_patient and any(kw in _recv for kw in search_keywords))
                     if not _hit:
+                        excluded += 1
                         continue
 
                 results.append({
@@ -4794,7 +4818,7 @@ def run_status_scan(start_date: str = "", end_date: str = "",
             log(f"{page_no}페이지 누적 {len(results)}건")
 
         update_progress(100, f"조회 완료 — {len(results)}건")
-        log(f"\n조회 완료: {len(results)}건")
+        log(f"\n조회 완료: {len(results)}건 (조건 미일치로 제외 {excluded}건)")
         return results
     except Exception as e:
         log(f"✗ 조회 실패: {e}")
