@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "15.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "15.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4702,8 +4702,10 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
 # ---------- 일괄 상태 변경 ----------
 def run_status_scan(start_date: str = "", end_date: str = "",
                     status_filter: str = "", hospital_filter: str = "",
+                    search_target: str = "", search_filter: str = "",
                     log_callback=None, progress_callback=None, cancel_check=None) -> list:
-    """기간·현재상태·한의원 조건으로 주문을 조회해 목록 반환 (일괄 상태 변경 대상 선택용)."""
+    """기간·현재상태·한의원·주문자/수취인 조건으로 주문을 조회해 목록 반환
+    (일괄 상태 변경 대상 선택용)."""
     def log(msg):
         print(msg)
         if log_callback:
@@ -4725,8 +4727,13 @@ def run_status_scan(start_date: str = "", end_date: str = "",
 
         order_ings = STATUS_VALUE_MAP.get(status_filter, "") if status_filter else ""
         hospital_keywords = HOSPITAL_SEARCH_MAP.get(hospital_filter, [hospital_filter]) if hospital_filter else []
+        # 주문자(회원명) / 수취인·환자명(복용자) 검색 — 콤마로 여러 개
+        search_keywords = [clean_text(p) for p in re.split(r"[,，]", clean_text(search_filter or "")) if clean_text(p)]
+        search_member  = search_target in ("주문자명", "주문자명+환자명")
+        search_patient = search_target in ("환자명(복용자)", "주문자명+환자명")
         log(f"조회 조건 — 기간: {start_date or '전체'} ~ {end_date or '전체'} / "
-            f"상태: {status_filter or '전체'} / 한의원: {hospital_filter or '전체'}")
+            f"상태: {status_filter or '전체'} / 한의원: {hospital_filter or '전체'}"
+            + (f" / {search_target}: {search_filter}" if search_keywords else ""))
 
         seen = set()
         for page_no in range(1, MAX_PAGE_SAFETY_LIMIT + 1):
@@ -4762,6 +4769,17 @@ def run_status_scan(start_date: str = "", end_date: str = "",
                         str(item.get("row_text", "") or ""),
                     ]))
                     if not all(kw in haystack for kw in hospital_keywords):
+                        continue
+
+                # 주문자/수취인(환자명) 검색 필터
+                if search_keywords:
+                    _member = clean_text(str(md.get("회원명", "") or ""))
+                    _recv = clean_text(" ".join([
+                        str(md.get("환자명", "") or ""), str(md.get("받는분", "") or ""),
+                    ]))
+                    _hit = (search_member and any(kw in _member for kw in search_keywords)) or \
+                           (search_patient and any(kw in _recv for kw in search_keywords))
+                    if not _hit:
                         continue
 
                 results.append({
@@ -9319,22 +9337,29 @@ def launch_gui():
     tab5 = ttk.Frame(notebook, padding=12)
     notebook.add(tab5, text="일괄 상태 변경")
     tab5.columnconfigure(0, weight=1)
-    tab5.rowconfigure(3, weight=1)
 
     # ── 조회 조건 ──
-    b_cond_lf = ttk.LabelFrame(tab5, text="조회 조건", padding=(8, 6))
-    b_cond_lf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-    b_cond_lf.columnconfigure(1, weight=1)
-    b_cond_lf.columnconfigure(3, weight=1)
+    # ── 조회 기간 (다른 탭과 동일 구조: 날짜 + 시간 + 프리셋 버튼) ──
+    b_date_lf = ttk.LabelFrame(tab5, text="조회 기간", padding=(8, 4))
+    b_date_lf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    b_date_lf.columnconfigure(1, weight=1)
 
-    ttk.Label(b_cond_lf, text="시작").grid(row=0, column=0, sticky="w", padx=(0, 6))
-    b_start_entry = tk.Entry(b_cond_lf, width=12, justify="center", **_ENTRY_KW)
+    ttk.Label(b_date_lf, text="시작").grid(row=0, column=0, sticky="w", padx=(0, 6))
+    b_start_entry = tk.Entry(b_date_lf, width=13, justify="center", **_ENTRY_KW)
     b_start_entry.grid(row=0, column=1, sticky="ew", ipady=2)
-    ttk.Label(b_cond_lf, text="종료").grid(row=0, column=2, sticky="w", padx=(8, 6))
-    b_end_entry = tk.Entry(b_cond_lf, width=12, justify="center", **_ENTRY_KW)
-    b_end_entry.grid(row=0, column=3, sticky="ew", ipady=2)
-    _ph_add(b_start_entry, "YYYY-MM-DD")
-    _ph_add(b_end_entry,   "YYYY-MM-DD")
+    b_start_time_entry = tk.Entry(b_date_lf, width=9, justify="center", **_ENTRY_KW)
+    b_start_time_entry.grid(row=0, column=2, padx=(6, 0), ipady=2)
+
+    ttk.Label(b_date_lf, text="종료").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(5, 0))
+    b_end_entry = tk.Entry(b_date_lf, width=13, justify="center", **_ENTRY_KW)
+    b_end_entry.grid(row=1, column=1, sticky="ew", pady=(5, 0), ipady=2)
+    b_end_time_entry = tk.Entry(b_date_lf, width=9, justify="center", **_ENTRY_KW)
+    b_end_time_entry.grid(row=1, column=2, padx=(6, 0), pady=(5, 0), ipady=2)
+
+    _ph_add(b_start_entry,      "YYYY-MM-DD")
+    _ph_add(b_start_time_entry, "시간 (선택)")
+    _ph_add(b_end_entry,        "YYYY-MM-DD")
+    _ph_add(b_end_time_entry,   "시간 (선택)")
 
     def b_set_today():
         t = datetime.today().strftime("%Y-%m-%d")
@@ -9351,43 +9376,86 @@ def launch_gui():
                 else t.replace(month=t.month + 1, day=1)) - timedelta(days=1)
         _ph_set_date(b_start_entry, first); _ph_set_date(b_end_entry, last.strftime("%Y-%m-%d"))
 
+    def b_set_last_month():
+        t = datetime.today()
+        last = t.replace(day=1) - timedelta(days=1)
+        _ph_set_date(b_start_entry, last.replace(day=1).strftime("%Y-%m-%d"))
+        _ph_set_date(b_end_entry,   last.strftime("%Y-%m-%d"))
+
+    def b_set_this_year():
+        y = datetime.today().year
+        _ph_set_date(b_start_entry, f"{y}-01-01"); _ph_set_date(b_end_entry, f"{y}-12-31")
+
+    def b_set_last_year():
+        y = datetime.today().year - 1
+        _ph_set_date(b_start_entry, f"{y}-01-01"); _ph_set_date(b_end_entry, f"{y}-12-31")
+
     def b_clear_dates():
-        for e in (b_start_entry, b_end_entry):
+        for e in (b_start_entry, b_start_time_entry, b_end_entry, b_end_time_entry):
             e.delete(0, tk.END); e.insert(0, _ph_map[e]); e.config(fg=_PH_COLOR)
 
-    b_date_btns = ttk.Frame(b_cond_lf)
-    b_date_btns.grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
-    ttk.Button(b_date_btns, text="오늘",   command=b_set_today,      width=6).pack(side="left", padx=(0, 3))
-    ttk.Button(b_date_btns, text="어제",   command=b_set_yesterday,  width=6).pack(side="left", padx=3)
-    ttk.Button(b_date_btns, text="이번달", command=b_set_this_month, width=6).pack(side="left", padx=3)
-    ttk.Button(b_date_btns, text="초기화", command=b_clear_dates,    width=6).pack(side="left", padx=3)
+    b_date_btns = ttk.Frame(b_date_lf)
+    b_date_btns.grid(row=0, column=4, rowspan=2, sticky="nsew", padx=(10, 0))
+    for _c in range(4):
+        b_date_btns.columnconfigure(_c, weight=1, uniform="bdb")
+    ttk.Button(b_date_btns, text="오늘",   command=b_set_today,      width=_bw).grid(row=0, column=0, sticky="ew", padx=_px, pady=(0, 3))
+    ttk.Button(b_date_btns, text="이번달", command=b_set_this_month, width=_bw).grid(row=0, column=1, sticky="ew", padx=_px, pady=(0, 3))
+    ttk.Button(b_date_btns, text="올해",   command=b_set_this_year,  width=_bw).grid(row=0, column=2, sticky="ew", padx=_px, pady=(0, 3))
+    ttk.Button(b_date_btns, text="어제",   command=b_set_yesterday,  width=_bw).grid(row=1, column=0, sticky="ew", padx=_px)
+    ttk.Button(b_date_btns, text="저번달", command=b_set_last_month, width=_bw).grid(row=1, column=1, sticky="ew", padx=_px)
+    ttk.Button(b_date_btns, text="작년",   command=b_set_last_year,  width=_bw).grid(row=1, column=2, sticky="ew", padx=_px)
+    ttk.Button(b_date_btns, text="초기화", command=b_clear_dates,    width=_bw).grid(row=0, column=3, rowspan=2, sticky="nsew")
 
-    ttk.Label(b_cond_lf, text="한의원").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
+    # ── 필터 (한의원 · 현재 상태 · 주문자/수취인) ──
+    b_filter_lf = ttk.LabelFrame(tab5, text="필터", padding=(8, 4))
+    b_filter_lf.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    b_filter_lf.columnconfigure(1, weight=1)
+
+    ttk.Label(b_filter_lf, text="한의원").grid(row=0, column=0, sticky="w", padx=(0, 8))
     b_hospital_var = tk.StringVar(value="")
-    ttk.Combobox(b_cond_lf, textvariable=b_hospital_var,
-                 values=HOSPITAL_PRESETS, state="normal", width=12).grid(
-        row=2, column=1, sticky="ew", pady=(6, 0))
-    ttk.Label(b_cond_lf, text="현재 상태").grid(row=2, column=2, sticky="w", padx=(8, 6), pady=(6, 0))
+    ttk.Combobox(b_filter_lf, textvariable=b_hospital_var,
+                 values=HOSPITAL_PRESETS, state="normal").grid(row=0, column=1, sticky="ew")
+    ttk.Button(b_filter_lf, text="지우기",
+               command=lambda: b_hospital_var.set("")).grid(row=0, column=2, padx=(4, 0))
+
+    ttk.Label(b_filter_lf, text="현재 상태").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
     b_cur_status_var = tk.StringVar(value="")
-    ttk.Combobox(b_cond_lf, textvariable=b_cur_status_var,
-                 values=[""] + ALL_STATUSES, state="readonly", width=10).grid(
-        row=2, column=3, sticky="ew", pady=(6, 0))
+    ttk.Combobox(b_filter_lf, textvariable=b_cur_status_var,
+                 values=[""] + ALL_STATUSES, state="readonly").grid(row=1, column=1, sticky="ew", pady=(6, 0))
+    ttk.Button(b_filter_lf, text="지우기",
+               command=lambda: b_cur_status_var.set("")).grid(row=1, column=2, padx=(4, 0), pady=(6, 0))
+
+    ttk.Label(b_filter_lf, text="검색대상").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
+    b_search_row = ttk.Frame(b_filter_lf)
+    b_search_row.grid(row=2, column=1, sticky="ew", pady=(6, 0))
+    b_search_row.columnconfigure(1, weight=1)
+    b_search_target_var = tk.StringVar(value="주문자명")
+    ttk.Combobox(b_search_row, textvariable=b_search_target_var,
+                 values=["주문자명", "환자명(복용자)", "주문자명+환자명"],
+                 state="readonly", width=16).grid(row=0, column=0, sticky="w", padx=(0, 6))
+    b_search_filter_var = tk.StringVar(value="")
+    tk.Entry(b_search_row, textvariable=b_search_filter_var, **_ENTRY_KW).grid(
+        row=0, column=1, sticky="ew", ipady=2)
+    ttk.Button(b_filter_lf, text="지우기",
+               command=lambda: b_search_filter_var.set("")).grid(row=2, column=2, padx=(4, 0), pady=(6, 0))
+    ttk.Label(b_filter_lf, text="검색어는 콤마로 여러 개 입력 가능 · 비우면 전체",
+              foreground="gray").grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     b_scan_cancel_event = threading.Event()
-    b_scan_frame = ttk.Frame(b_cond_lf)
-    b_scan_frame.grid(row=3, column=0, columnspan=4, sticky="e", pady=(6, 0))
-    b_scan_cancel_btn = ttk.Button(b_scan_frame, text="취소", state="disabled", width=6,
+    b_scan_frame = ttk.Frame(b_filter_lf)
+    b_scan_frame.grid(row=4, column=0, columnspan=3, sticky="e", pady=(6, 0))
+    b_scan_cancel_btn = ttk.Button(b_scan_frame, text="취소", state="disabled", width=7,
                                    command=lambda: b_scan_cancel_event.set())
-    b_scan_cancel_btn.pack(side="right", padx=(3, 0))
+    b_scan_cancel_btn.pack(side="right", padx=(4, 0))
     b_scan_btn = ttk.Button(b_scan_frame, text="조회", width=8)
     b_scan_btn.pack(side="right")
 
     # ── 조회 결과 목록 (체크박스 선택) ──
     b_list_lf = ttk.LabelFrame(tab5, text="조회 결과 (클릭하여 선택)", padding=(8, 6))
-    b_list_lf.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
+    b_list_lf.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
     b_list_lf.columnconfigure(0, weight=1)
     b_list_lf.rowconfigure(0, weight=1)
-    tab5.rowconfigure(1, weight=1)
+    tab5.rowconfigure(2, weight=1)
 
     b_tree = ttk.Treeview(b_list_lf, columns=("chk", "code", "patient", "hosp", "date", "status"),
                           show="headings", height=10, selectmode="none")
@@ -9438,7 +9506,7 @@ def launch_gui():
 
     # ── 변경 실행 ──
     b_apply_lf = ttk.LabelFrame(tab5, text="일괄 변경", padding=(8, 6))
-    b_apply_lf.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+    b_apply_lf.grid(row=3, column=0, sticky="ew", pady=(0, 6))
     b_apply_lf.columnconfigure(1, weight=1)
     ttk.Label(b_apply_lf, text="변경할 상태").grid(row=0, column=0, sticky="w", padx=(0, 6))
     b_target_status_var = tk.StringVar(value="")
@@ -9480,14 +9548,17 @@ def launch_gui():
         if not ensure_admin_credentials(root):
             return
         try:
-            s_date = normalize_date_input(_ph_get(b_start_entry))
-            e_date = normalize_date_input(_ph_get(b_end_entry))
+            s_date = normalize_date_input(" ".join(filter(None, [
+                _ph_get(b_start_entry), _ph_get(b_start_time_entry)])))
+            e_date = normalize_date_input(" ".join(filter(None, [
+                _ph_get(b_end_entry), _ph_get(b_end_time_entry)])))
         except ValueError as ex:
             messagebox.showerror("입력 오류", str(ex))
             return
-        if not s_date and not e_date and not b_hospital_var.get().strip():
+        if not s_date and not e_date and not b_hospital_var.get().strip() \
+                and not b_search_filter_var.get().strip():
             if not messagebox.askyesno("전체 조회 확인",
-                                       "기간·한의원 조건이 없습니다. 전체를 조회하면 오래 걸릴 수 있어요.\n계속할까요?"):
+                                       "기간·한의원·검색어 조건이 없습니다. 전체를 조회하면 오래 걸릴 수 있어요.\n계속할까요?"):
                 return
 
         b_scan_cancel_event.clear()
@@ -9503,6 +9574,7 @@ def launch_gui():
                 rows = run_status_scan(
                     s_date, e_date,
                     b_cur_status_var.get().strip(), b_hospital_var.get().strip(),
+                    b_search_target_var.get().strip(), b_search_filter_var.get().strip(),
                     log_callback=b_log, progress_callback=b_progress,
                     cancel_check=lambda: b_scan_cancel_event.is_set(),
                 )
