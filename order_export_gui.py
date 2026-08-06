@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "15.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "15.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2205,12 +2205,14 @@ def export_label_excel(xlsx_path: str):
             return ''
         pres = clean_text(str(row.get('처방명', '') or ''))
         code = GORAE_PANAK_CODE_MAP.get(pres, '')
-        if not code:
+        note = clean_text(str(row.get('처방비고', '') or ''))
+        if not code and note:
             # _split_pres 가 처방명의 일부인 괄호까지 잘랐을 경우 재조합해서 재시도
             # 예: "위당귀수산(평위산합방)" → 처방명="위당귀수산", 처방비고="평위산합방" → "위당귀수산(평위산합방)"
-            note = clean_text(str(row.get('처방비고', '') or ''))
-            if note:
-                code = GORAE_PANAK_CODE_MAP.get(f'{pres}({note})', '')
+            code = GORAE_PANAK_CODE_MAP.get(f'{pres}({note})', '')
+        if not code:
+            # 지정된 영문코드가 없으면 처방명을 그대로 사용 (라벨 공란 방지)
+            code = f'{pres}({note})' if note else pres
         return code
     label_df['라벨코드'] = label_df.apply(get_panak_code, axis=1)
 
