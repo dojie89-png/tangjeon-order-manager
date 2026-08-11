@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "16.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "16.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -642,15 +642,24 @@ def format_order_datetime_for_filename(value: str) -> str:
     return sanitize_filename(value)
 
 
-def parse_filter_datetime(datetime_str: str):
-    """날짜+시간 문자열을 datetime 객체로 변환. 시간 없으면 None 반환."""
+def parse_filter_datetime(datetime_str: str, end_of_minute: bool = False):
+    """날짜+시간 문자열을 datetime 객체로 변환. 시간 없으면 None 반환.
+
+    end_of_minute=True (종료 시각용): 초를 생략한 입력은 그 분의 끝으로 해석.
+      예) "12:00" → 12:00:59  → 12시 0분대에 들어온 주문도 모두 포함.
+      초를 직접 적은 경우("12:00:30")는 그대로 존중한다.
+    """
     if not datetime_str or " " not in datetime_str:
         return None
-    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
-        try:
-            return datetime.strptime(datetime_str, fmt)
-        except Exception:
-            pass
+    try:
+        return datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    try:
+        dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
+        return dt.replace(second=59) if end_of_minute else dt
+    except Exception:
+        pass
     return None
 
 
@@ -2825,7 +2834,7 @@ def run_job(settings: dict, progress_callback=None):
         update_progress(10, "주문 목록 조회 준비 중...")
 
         filter_start_dt = parse_filter_datetime(settings["start_date"])
-        filter_end_dt = parse_filter_datetime(settings["end_date"])
+        filter_end_dt = parse_filter_datetime(settings["end_date"], end_of_minute=True)
         if filter_start_dt:
             print(f"⏰ 시작 시각 필터 적용: {settings['start_date']} 이전 주문은 추출에서 제외됩니다.")
         if filter_end_dt:
@@ -3818,7 +3827,7 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
             log(f"상세내역 파일: {sum(len(v) for v in detail_by_phone.values())}건 읽음 (전화번호 기준)")
 
         filter_start_dt = parse_filter_datetime(start_date)
-        filter_end_dt = parse_filter_datetime(end_date)
+        filter_end_dt = parse_filter_datetime(end_date, end_of_minute=True)
         if filter_start_dt:
             log(f"⏰ 시작 시각 필터 적용: {start_date} 이전 주문은 추출에서 제외됩니다.")
         if filter_end_dt:
@@ -4119,7 +4128,7 @@ def run_bulk_scan(start_date: str = "", end_date: str = "",
         login_driver(driver, ADMIN_ID, ADMIN_PW)
 
         filter_start_dt = parse_filter_datetime(start_date)
-        filter_end_dt = parse_filter_datetime(end_date)
+        filter_end_dt = parse_filter_datetime(end_date, end_of_minute=True)
         if filter_start_dt:
             prog(5, f"⏰ 시작 시각 필터: {start_date} 이전 제외")
             print(f"⏰ 시작 시각 필터 적용: {start_date} 이전 주문은 추출에서 제외됩니다.")
@@ -4446,7 +4455,7 @@ def run_complete_job(start_date: str = "", end_date: str = "", ignore_status: bo
             progress_callback(pct, msg)
 
     filter_start_dt = parse_filter_datetime(start_date)
-    filter_end_dt   = parse_filter_datetime(end_date)
+    filter_end_dt   = parse_filter_datetime(end_date, end_of_minute=True)
     if filter_start_dt:
         log(f"⏰ 시작 시각 필터 적용: {start_date} 이전 주문은 추출에서 제외됩니다.")
     if filter_end_dt:
@@ -4744,7 +4753,7 @@ def run_status_scan(start_date: str = "", end_date: str = "",
         search_patient = search_target in ("환자명(복용자)", "주문자명+환자명")
         # 시간까지 입력된 경우 클라이언트에서 추가 필터 (URL 은 날짜만 지원)
         filter_start_dt = parse_filter_datetime(start_date)
-        filter_end_dt = parse_filter_datetime(end_date)
+        filter_end_dt = parse_filter_datetime(end_date, end_of_minute=True)
         log(f"조회 조건 — 기간: {start_date or '전체'} ~ {end_date or '전체'} / "
             f"상태: {status_filter or '전체'} / 한의원: {hospital_filter or '전체'}"
             + (f" / {search_target}: {search_filter}" if search_keywords else ""))
@@ -6370,7 +6379,7 @@ def run_sp_delivery_job(detail_excel_path: str, start_date: str = "", end_date: 
             raise NoWorkFound("CJ 파일에서 매칭 가능한 주문이 없어요.")
 
         filter_start_dt = parse_filter_datetime(start_date)
-        filter_end_dt   = parse_filter_datetime(end_date)
+        filter_end_dt   = parse_filter_datetime(end_date, end_of_minute=True)
         if filter_start_dt:
             log(f"⏰ 시작 필터: {start_date}")
         if filter_end_dt:
@@ -6543,7 +6552,7 @@ def run_sp_complete_job(start_date: str = "", end_date: str = "",
     driver = None
     try:
         filter_start_dt = parse_filter_datetime(start_date)
-        filter_end_dt   = parse_filter_datetime(end_date)
+        filter_end_dt   = parse_filter_datetime(end_date, end_of_minute=True)
         if filter_start_dt:
             log(f"⏰ 시작 필터: {start_date}")
         if filter_end_dt:
