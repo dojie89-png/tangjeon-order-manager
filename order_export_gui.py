@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "16.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "16.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3744,10 +3744,96 @@ def run_job(settings: dict, progress_callback=None):
 # ---------- 송장번호 입력 실행 ----------
 DELIVERY_TARGET_STATUSES = ["접수대기", "입금대기", "조제중", "탕전중"]
 
+# ---------- 알림톡 ----------
+# 알림톡을 보내지 않을 한의원 (한의원명·보내는분·회원명 중 하나라도 포함되면 제외)
+ALIMTALK_EXCLUDE_KEYWORDS = [
+    "고래",      # 고래한방병원 4곳 (관저·판암·세종·오창)
+    "필한방",    # 필한방병원 3곳 (대전·청주·성동)
+    "약손",      # 약손한의원
+    "굿니스",    # 대전굿니스한의원
+    "제민", "조시용",    # 제민한의원(조시용)
+    "태화당", "이성준",  # 태화당한의원(이성준)
+]
 
-def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str = "", log_callback=None, progress_callback=None, cancel_check=None):
+
+def is_alimtalk_excluded(hospital: str, member: str = "") -> bool:
+    """알림톡 제외 대상인지 판정 (한의원명/보내는분/회원명 부분 일치)."""
+    hay = clean_text(f"{hospital} {member}")
+    return any(kw in hay for kw in ALIMTALK_EXCLUDE_KEYWORDS)
+
+
+def send_alimtalk_for_seqnos(driver, target_seqnos: set, start_date: str = "",
+                             end_date: str = "", log=print) -> dict:
+    """목록 페이지에서 대상 주문 체크박스를 선택하고 [알림톡] 실행.
+
+    사이트 구조:
+      체크박스  <input type="checkbox" name="check" value="{seqno}">
+      알림톡    <a href="javascript:me_talk();">[알림톡]</a>
+    me_talk() 은 현재 페이지에서 체크된 항목만 처리하므로 페이지 단위로 반복한다.
+    """
+    from selenium.webdriver.common.by import By
+    sent = 0
+    pages_done = 0
+    remaining = set(target_seqnos)
+    if not remaining:
+        return {"sent": 0, "pages": 0}
+
+    ship_value = STATUS_VALUE_MAP.get("발송", "5")
+    for page_no in range(1, MAX_PAGE_SAFETY_LIMIT + 1):
+        if not remaining:
+            break
+        driver.get(build_order_list_url(page_no, start_date, end_date, ship_value))
+        time.sleep(1.5)
+
+        boxes = driver.find_elements(By.CSS_SELECTOR, 'input[type="checkbox"][name="check"]')
+        if not boxes:
+            break
+
+        picked = 0
+        for b in boxes:
+            try:
+                val = clean_text(b.get_attribute("value") or "")
+                if val in remaining:
+                    if not b.is_selected():
+                        driver.execute_script("arguments[0].click();", b)
+                    picked += 1
+                    remaining.discard(val)
+                elif b.is_selected():
+                    driver.execute_script("arguments[0].click();", b)  # 의도치 않은 선택 해제
+            except Exception:
+                continue
+
+        if picked:
+            try:
+                driver.execute_script("me_talk();")
+                time.sleep(1.5)
+                # 확인/완료 알럿 처리
+                for _ in range(3):
+                    try:
+                        al = driver.switch_to.alert
+                        log(f"  [알림톡] 알럿: {clean_text(al.text)[:60]}")
+                        al.accept()
+                        time.sleep(0.8)
+                    except Exception:
+                        break
+                sent += picked
+                pages_done += 1
+                log(f"  ✓ {page_no}페이지 알림톡 발송: {picked}건")
+            except Exception as e:
+                log(f"  ✗ {page_no}페이지 알림톡 실패: {e}")
+        time.sleep(0.5)
+
+    if remaining:
+        log(f"  ⚠ 목록에서 찾지 못한 주문 {len(remaining)}건 (알림톡 미발송)")
+    return {"sent": sent, "pages": pages_done, "not_found": len(remaining)}
+
+
+def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str = "", log_callback=None, progress_callback=None, cancel_check=None,
+                     send_alimtalk: bool = False):
     _log_lines: list = []
     _run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    alimtalk_targets: list = []   # 발송처리 성공 + 알림톡 대상
+    alimtalk_skipped: list = []   # 발송처리 성공했으나 알림톡 제외 대상
 
     def log(msg):
         print(msg)
@@ -3905,6 +3991,10 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
                     "html_text": html_text,
                     "already_done": already_done,
                     "existing_tracking": existing_tracking,
+                    # 알림톡 대상 판별용 (한의원·회원명·seqno)
+                    "seqno": extract_seqno_from_detail_url(href),
+                    "hospital": clean_text(master_data.get("한의원명", "") or master_data.get("보내는분", "") or ""),
+                    "member": clean_text(master_data.get("회원명", "") or ""),
                 }
                 site_by_ordercode[ordercode] = order_info
 
@@ -4055,12 +4145,42 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
 
                 success_count += 1
                 log(f"✓ 완료: {item['ordercode']} {item['patient_name']} → {item['tracking']}")
+
+                # 알림톡 대상 수집 (발송처리 성공 = 송장번호 입력 완료된 건만)
+                _info = site_by_ordercode.get(item["ordercode"], {})
+                _hosp = _info.get("hospital", "")
+                _memb = _info.get("member", "")
+                _seq = _info.get("seqno") or extract_seqno_from_detail_url(item["url"])
+                if _seq:
+                    if is_alimtalk_excluded(_hosp, _memb):
+                        alimtalk_skipped.append(f"{_hosp or '-'} {item['patient_name']}")
+                    else:
+                        alimtalk_targets.append({
+                            "seqno": str(_seq), "hospital": _hosp,
+                            "patient": item["patient_name"], "ordercode": item["ordercode"],
+                        })
             except Exception as e:
                 fail_count += 1
                 log(f"✗ 실패: {item['ordercode']} {item['patient_name']} → {e}")
 
+        # ── 알림톡 발송 (옵션) ──
+        if send_alimtalk and alimtalk_targets:
+            update_progress(97, f"알림톡 발송 중... ({len(alimtalk_targets)}건)")
+            log(f"\n[알림톡] 대상 {len(alimtalk_targets)}건 / 제외 {len(alimtalk_skipped)}건")
+            for t in alimtalk_targets:
+                log(f"  · {t['hospital'] or '-'} {t['patient']}")
+            _res = send_alimtalk_for_seqnos(
+                driver, {t["seqno"] for t in alimtalk_targets},
+                start_date, end_date, log=log,
+            )
+            log(f"[알림톡] 발송 완료: {_res['sent']}건")
+        elif send_alimtalk:
+            log("\n[알림톡] 발송 대상이 없어요 (전부 제외 대상이거나 성공 건 없음).")
+
         update_progress(100, "완료")
         log(f"\n완료: 성공 {success_count}건 / 실패 {fail_count}건 / 스킵 {len(skipped)}건")
+        if send_alimtalk:
+            log(f"알림톡: 발송 {len(alimtalk_targets)}건 / 제외 {len(alimtalk_skipped)}건")
 
     finally:
         # 실행 로그를 대한통운 파일과 같은 폴더에 저장 (발송 문제 원인 추적용)
@@ -8000,8 +8120,16 @@ def launch_gui():
               foreground="gray", font=("Malgun Gothic", 8)
               ).grid(row=1, column=0, sticky="w", pady=(2, 4))
 
+    send_alimtalk_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(cj_delivery_lf, text="발송처리 후 알림톡 발송 (일부 한의원 제외)",
+                    variable=send_alimtalk_var).grid(row=2, column=0, sticky="w", pady=(0, 2))
+    ttk.Label(cj_delivery_lf,
+              text="※ 제외: 고래한방·필한방·약손·굿니스·제민·태화당",
+              foreground="gray", font=("Malgun Gothic", 8)
+              ).grid(row=3, column=0, sticky="w", pady=(0, 4))
+
     d_action_frame = ttk.Frame(cj_delivery_lf)
-    d_action_frame.grid(row=2, column=0, sticky="ew", pady=(0, 2))
+    d_action_frame.grid(row=4, column=0, sticky="ew", pady=(0, 2))
     delivery_cancel_event = threading.Event()
     delivery_cancel_btn = ttk.Button(d_action_frame, text="취소", state="disabled",
                                      command=lambda: delivery_cancel_event.set())
@@ -8030,6 +8158,17 @@ def launch_gui():
         except ValueError as e:
             messagebox.showerror("입력 오류", str(e))
             return
+
+        # 알림톡은 환자에게 실제 발송되므로 실행 전 확인
+        if send_alimtalk_var.get():
+            if not messagebox.askyesno(
+                "알림톡 발송 확인",
+                "발송처리가 끝난 주문에 알림톡을 실제로 발송합니다.\n\n"
+                "제외 한의원: 고래한방(4곳) · 필한방(3곳) · 약손 ·\n"
+                "대전굿니스 · 제민 · 태화당\n\n"
+                "위 한의원을 제외한 나머지에 발송합니다. 진행할까요?"
+            ):
+                return
 
         _global_running.set()
         delivery_cancel_event.clear()
@@ -8074,6 +8213,7 @@ def launch_gui():
                         log_callback=_log_capture,
                         progress_callback=delivery_gui_progress,
                         cancel_check=delivery_cancel_event.is_set,
+                        send_alimtalk=send_alimtalk_var.get(),
                     )
                 _save_delivery_log()
                 if delivery_cancel_event.is_set():
