@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "16.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "16.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4207,6 +4207,16 @@ def run_bulk_scan(start_date: str = "", end_date: str = "",
                             break
                         log(f"⚠ 상세 페이지 오류 (스킵): {href[:60]} → {err[:60]}")
                         continue
+
+                    # 시간까지 입력한 경우 실제 주문 시각으로 필터
+                    # (위 목록 단계는 날짜만 비교하므로 여기서 시·분·초를 반영)
+                    if filter_start_dt or filter_end_dt:
+                        _odt = parse_order_datetime_obj(master_data.get("주문날짜", ""))
+                        if _odt:
+                            if filter_start_dt and _odt < filter_start_dt:
+                                continue
+                            if filter_end_dt and _odt > filter_end_dt:
+                                continue
 
                     delivery_type = clean_text(master_data.get("배송구분", ""))
                     hospital_name = clean_text(master_data.get("한의원명", "") or "")
