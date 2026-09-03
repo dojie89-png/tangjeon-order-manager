@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2030,23 +2030,19 @@ TANGJEON_ROOM_NAME_MAP = {
 }
 
 # 라벨의 한의원_구분 → 단가표 한의원 키 판별 순서 (구체적인 것 먼저)
-# 단가표 대상이 아닌 한의원 (이름에 '필한방'이 들어가도 매핑하지 않음)
-_TANGJEON_EXCLUDED_CLINICS = ["성동"]
-
-
 def _tangjeon_clinic_key(clinic_text: str) -> str:
     """한의원_구분/한의원명에서 단가표의 한의원 키를 판별. 대상 아니면 빈 문자열.
 
-    단가표 대상은 고래한방(관저·판암·세종·오창 4곳) / 청주필한방병원 /
-    필한방병원(대전) 뿐이다. 성동필한방병원은 대상이 아니므로 제외한다.
+    단가표 대상:
+      고래한방  — 관저·판암·세종·오창 4곳
+      청주필    — 청주필한방병원 + 성동필한방병원 (동일 처방명 체계 공유)
+      필한방    — 대전 필한방병원
     """
     c = clean_text(str(clinic_text or ""))
-    if any(x in c for x in _TANGJEON_EXCLUDED_CLINICS):
-        return ""
     if "고래" in c:
         return "고래한방"
-    if "청주필" in c:
-        return "청주필"
+    if "청주필" in c or "성동" in c:
+        return "청주필"   # 성동필은 청주필과 처방명 공유
     if "필한방" in c:
         return "필한방"   # 대전 필한방병원
     return ""
@@ -2080,7 +2076,9 @@ def lookup_tangjeon_room_name(clinic: str, pres_name: str, pres_note: str = "") 
     if note:
         cands.append(f"{base}({note})")
     trimmed = base
-    for pat in (r"제\s*\d+\s*가감\s*$", r"가감방\d*\s*$", r"가감\s*$", r"가미\s*$"):
+    # TA 를 먼저 떼야 그 앞의 '가감'까지 단계적으로 벗겨진다.
+    #   예) 당귀지통탕가감TA → 당귀지통탕가감 → 당귀지통탕
+    for pat in (r"\s*[Tt][Aa]\s*$", r"제\s*\d+\s*가감\s*$", r"가감방\d*\s*$", r"가감\s*$", r"가미\s*$"):
         new = re.sub(pat, "", trimmed).strip()
         if new and new != trimmed:
             trimmed = new
