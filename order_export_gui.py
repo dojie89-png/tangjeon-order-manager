@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "16.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "16.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -1966,6 +1966,97 @@ def get_gorae_branch(text: str) -> str:
     return '고래한방_관저'  # fallback
 
 
+# ---------- 처방명 → 탕전실용 처방명 ----------
+# 출처: "고래-필 단가표" 시트의 [처방명] → [처방명_탕전실용]
+# 한의원별 처방명이 겹쳐도 탕전실용 값은 동일해 처방명만으로 매핑 (충돌 없음 확인).
+TANGJEON_ROOM_NAME_MAP = {
+    "감맥대조탕": "감맥대조탕",
+    "강활쌍금탕": "강활쌍금탕",
+    "계지가갈근탕": "계지가갈근탕",
+    "귀비온담탕": "귀비온담탕",
+    "당귀수산": "당귀수산",
+    "위당귀수산": "위당귀수산",
+    "오적산": "오적산",
+    "오령산": "오령산",
+    "작약감초탕": "작약감초탕",
+    "당귀수산 합 평위산": "위당귀수산",
+    "당귀지통탕가감": "당귀수산",
+    "안신지통탕가감": "당귀수산",
+    "활혈정통탕가감": "당귀수산",
+    "활락지통탕가감": "당귀수산",
+    "소아당귀수산가감": "소아당귀",
+    "양위지통탕가감": "평진탕",
+    "거담지통탕가감": "평진탕",
+    "반백거담탕가감": "평진탕",
+    "익기지통탕가감": "보중익기탕",
+    "회양지통탕가감": "보중익기탕",
+    "서근축어탕가감": "척필탕",
+    "소경지통탕가감": "척필탕",
+    "팔물지통탕가감": "척필탕",
+    "양허지통탕가감": "쌍금탕",
+    "육미지통탕가감": "쌍금탕",
+    "반하백출천마탕": "반하백출천마탕",
+    "양심탕가감방": "양심탕가감방",
+    "갈근탕가감방": "갈근탕가감방",
+    "작약감초탕가감방": "작약감초탕",
+    "작약감초탕가감방1": "작약감초탕",
+    "작약지통탕": "작약감초탕",
+    "작약활혈탕": "작약감초탕",
+    "작약안신탕": "작약감초탕",
+    "양허지통탕": "작약감초탕",
+    "활혈지통탕": "작약감초탕",
+    "당귀수산가감방": "당귀수산",
+    "당귀수산가감방1": "당귀수산",
+    "당귀지통탕": "당귀수산",
+    "당귀활혈탕": "당귀수산",
+    "당귀안신탕": "당귀수산",
+    "서근축어탕": "당귀수산",
+    "보중익기탕가감방": "보중익기탕",
+    "보중익기탕": "보중익기탕",
+    "익기지통탕": "보중익기탕",
+    "익기보혈탕": "보중익기탕",
+    "익기부자탕": "보중익기탕",
+    "소경활혈탕": "소경활혈탕",
+}
+
+
+def _norm_pres_name(s: str) -> str:
+    """처방명 정규화 — 공백 제거."""
+    return re.sub(r"\s+", "", clean_text(str(s or "")))
+
+
+def lookup_tangjeon_room_name(pres_name: str, pres_note: str = "") -> str:
+    """처방명(+비고)으로 탕전실용 처방명을 찾는다. 못 찾으면 빈 문자열.
+
+    실제 주문명엔 "제1가감", "가감방", "가미" 같은 접미사가 붙으므로
+    원본 → 접미사 제거 순으로 단계적으로 매칭한다.
+    예) "당귀수산 제1가감" → "당귀수산"
+        "당귀수산 합 평위산 제2가감" → "당귀수산 합 평위산" → 위당귀수산
+    """
+    _norm_map = {_norm_pres_name(k): v for k, v in TANGJEON_ROOM_NAME_MAP.items()}
+    cands = []
+    base = clean_text(str(pres_name or ""))
+    if not base:
+        return ""
+    cands.append(base)
+    # 비고가 처방명의 일부였던 경우 재조합 ("오적산" + "소아" → "오적산(소아)")
+    note = clean_text(str(pres_note or ""))
+    if note:
+        cands.append(f"{base}({note})")
+    # 접미사 단계적 제거
+    trimmed = base
+    for pat in (r"제\s*\d+\s*가감\s*$", r"가감방\d*\s*$", r"가감\s*$", r"가미\s*$"):
+        new = re.sub(pat, "", trimmed).strip()
+        if new and new != trimmed:
+            trimmed = new
+            cands.append(trimmed)
+    for c in cands:
+        hit = _norm_map.get(_norm_pres_name(c))
+        if hit:
+            return hit
+    return ""
+
+
 GORAE_PANAK_CODE_MAP = {
     "위당귀수산": "WDGSS",
     "위당귀수산(평위산 합방)": "WDGSS",
@@ -2226,6 +2317,12 @@ def export_label_excel(xlsx_path: str):
         return code
     label_df['라벨코드'] = label_df.apply(get_panak_code, axis=1)
 
+    # 탕전실용 처방명 (고래-필 단가표 기준). 매칭 없으면 빈칸.
+    label_df['처방명_탕전실용'] = label_df.apply(
+        lambda r: lookup_tangjeon_room_name(r.get('처방명', ''), r.get('처방비고', '')),
+        axis=1,
+    )
+
     # 처방명에 대괄호 부착 ("위당귀수산" → "[위당귀수산]")
     if '처방명' in label_df.columns:
         def _wrap_pres(v):
@@ -2239,7 +2336,7 @@ def export_label_excel(xlsx_path: str):
 
     # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 합포여부 → 주소확인
     # (조제지시사항은 아래에서 항목별로 분리해 맨 오른쪽에 추가)
-    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
+    _tail_cols = ['처방비고', '처방명_탕전실용', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
     cols_order = list(label_df.columns)
     for col in _tail_cols:
         if col in cols_order:
