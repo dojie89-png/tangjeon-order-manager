@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "16.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2058,20 +2058,23 @@ def _norm_pres_name(s: str) -> str:
 
 
 def lookup_tangjeon_room_name(clinic: str, pres_name: str, pres_note: str = "") -> str:
-    """한의원 + 처방명(+비고)으로 탕전실용 처방명을 찾는다. 못 찾으면 빈 문자열.
+    """한의원 + 처방명(+비고)으로 탕전실용 처방명을 찾는다.
+
+    단가표에 매칭되면 탕전실용 명칭을, 매칭이 없으면(대상 아닌 한의원 포함)
+    원래 처방명을 그대로 반환한다.
 
     실제 주문명엔 "제1가감", "가감방", "가미" 같은 접미사가 붙으므로
     원본 → 접미사 제거 순으로 단계적으로 매칭한다.
     """
-    key = _tangjeon_clinic_key(clinic)
-    table = TANGJEON_ROOM_NAME_MAP.get(key)
-    if not table:
-        return ""
-    norm_map = {_norm_pres_name(k): v for k, v in table.items()}
-
     base = clean_text(str(pres_name or ""))
     if not base:
         return ""
+    key = _tangjeon_clinic_key(clinic)
+    table = TANGJEON_ROOM_NAME_MAP.get(key)
+    if not table:
+        return base   # 단가표 대상 한의원이 아니면 처방명 그대로
+    norm_map = {_norm_pres_name(k): v for k, v in table.items()}
+
     cands = [base]
     note = clean_text(str(pres_note or ""))
     if note:
@@ -2086,7 +2089,7 @@ def lookup_tangjeon_room_name(clinic: str, pres_name: str, pres_note: str = "") 
         hit = norm_map.get(_norm_pres_name(c))
         if hit:
             return hit
-    return ""
+    return base   # 표에 없는 처방은 처방명 그대로
 
 
 GORAE_PANAK_CODE_MAP = {
