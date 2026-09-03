@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "16.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "16.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2030,19 +2030,25 @@ TANGJEON_ROOM_NAME_MAP = {
 }
 
 # 라벨의 한의원_구분 → 단가표 한의원 키 판별 순서 (구체적인 것 먼저)
-_TANGJEON_CLINIC_KEYS = [
-    ("청주필", "청주필"),
-    ("고래",   "고래한방"),
-    ("필한방", "필한방"),   # 대전필·성동필 등 나머지 필한방
-]
+# 단가표 대상이 아닌 한의원 (이름에 '필한방'이 들어가도 매핑하지 않음)
+_TANGJEON_EXCLUDED_CLINICS = ["성동"]
 
 
 def _tangjeon_clinic_key(clinic_text: str) -> str:
-    """한의원_구분/한의원명에서 단가표의 한의원 키를 판별. 없으면 빈 문자열."""
+    """한의원_구분/한의원명에서 단가표의 한의원 키를 판별. 대상 아니면 빈 문자열.
+
+    단가표 대상은 고래한방(관저·판암·세종·오창 4곳) / 청주필한방병원 /
+    필한방병원(대전) 뿐이다. 성동필한방병원은 대상이 아니므로 제외한다.
+    """
     c = clean_text(str(clinic_text or ""))
-    for kw, key in _TANGJEON_CLINIC_KEYS:
-        if kw in c:
-            return key
+    if any(x in c for x in _TANGJEON_EXCLUDED_CLINICS):
+        return ""
+    if "고래" in c:
+        return "고래한방"
+    if "청주필" in c:
+        return "청주필"
+    if "필한방" in c:
+        return "필한방"   # 대전 필한방병원
     return ""
 
 
