@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3308,6 +3308,13 @@ def run_job(settings: dict, progress_callback=None):
                 "no_data": True,
             }
 
+        # 정렬 기준은 master_df 가 비어 있어도 아래(탕전시트·파일명)에서 쓰이므로
+        # 반드시 블록 밖에서 먼저 정의한다.
+        #   기본: 최신순 / 체크박스(sort_oldest_first=True): 오래된순
+        #   서버는 최신순 반환 → 수집순번 낮을수록 최신
+        oldest_first = settings.get("sort_oldest_first", False)
+        sn_asc = not oldest_first
+
         if not master_df.empty:
             # 취소요청건 제외 (처방명_목록추가표시 태그 기준)
             cancel_req_mask = master_df["처방명_목록추가표시"].apply(
@@ -3318,7 +3325,6 @@ def run_job(settings: dict, progress_callback=None):
                 master_df = master_df[~cancel_req_mask].reset_index(drop=True)
                 print(f"  취소요청건 제외: {cancel_req_count}건")
 
-            oldest_first = settings.get("sort_oldest_first", False)
             # datetime64[ns]로 변환 → object dtype 비교 불안정 문제 해소
             master_df["_sort_dt"] = pd.to_datetime(
                 master_df["주문날짜"].apply(parse_order_datetime_obj),
@@ -3326,9 +3332,6 @@ def run_job(settings: dict, progress_callback=None):
             )
             # 주문코드는 순번 배정이 아님 → tiebreaker로 사용 불가
             # 같은 분(minute) 내 동률은 수집순번으로 결정
-            # 서버는 최신순 반환 → 수집순번 낮을수록 최신
-            # 최신순(oldest_first=False): 수집순번 오름차순 / 오래된순: 내림차순
-            sn_asc = not oldest_first
             master_df.sort_values(
                 by=["_sort_dt", "수집순번"],
                 ascending=[oldest_first, sn_asc],
@@ -3891,6 +3894,145 @@ def is_alimtalk_excluded(hospital: str, member: str = "") -> bool:
     """알림톡 제외 대상인지 판정 (한의원명/보내는분/회원명 부분 일치)."""
     hay = clean_text(f"{hospital} {member}")
     return any(kw in hay for kw in ALIMTALK_EXCLUDE_KEYWORDS)
+
+
+def scan_alimtalk_candidates(start_date: str = "", end_date: str = "",
+                             log_callback=None, progress_callback=None,
+                             cancel_check=None) -> list:
+    """기간 내 '발송' 상태 + 송장번호 있는 주문 중 알림톡 대상 후보를 조회.
+
+    제외 한의원(ALIMTALK_EXCLUDE_KEYWORDS)은 후보에서 빼고,
+    각 건의 한의원·환자명·송장번호·seqno 를 담아 반환한다.
+    """
+    def log(msg):
+        print(msg)
+        if log_callback:
+            log_callback(msg)
+
+    def update_progress(pct, msg):
+        if progress_callback:
+            progress_callback(pct, msg)
+
+    driver = None
+    results: list = []
+    excluded = 0
+    try:
+        update_progress(5, "로그인 중...")
+        _opts = Options()
+        _opts.add_argument("--start-maximized")
+        driver = webdriver.Chrome(options=_opts)
+        wait = WebDriverWait(driver, 10)
+        login_driver(driver, ADMIN_ID, ADMIN_PW)
+
+        filter_start_dt = parse_filter_datetime(start_date)
+        filter_end_dt = parse_filter_datetime(end_date, end_of_minute=True)
+        ship_value = STATUS_VALUE_MAP.get("발송", "5")
+        log(f"알림톡 후보 조회 — 기간: {start_date or '전체'} ~ {end_date or '전체'} (발송 상태)")
+
+        seen = set()
+        for page_no in range(1, MAX_PAGE_SAFETY_LIMIT + 1):
+            if cancel_check and cancel_check():
+                log("⛔ 취소됨")
+                break
+            update_progress(min(90, 10 + page_no * 6), f"{page_no}페이지 조회 중... ({len(results)}건)")
+            driver.get(build_order_list_url(page_no, start_date, end_date, ship_value))
+            time.sleep(1.5)
+
+            detail_rows = collect_detail_links_on_current_page(driver, wait)
+            if not detail_rows:
+                break
+
+            for item in detail_rows:
+                if cancel_check and cancel_check():
+                    break
+                href = item["href"]
+                seqno = extract_seqno_from_detail_url(href)
+                if not seqno or seqno in seen:
+                    continue
+                seen.add(seqno)
+
+                driver.get(href)
+                time.sleep(1.0)
+                md = parse_detail_html(driver.page_source, href)
+
+                tracking = normalize_tracking_no(md.get("송장번호", ""))
+                if not tracking:
+                    continue   # 송장 없는 건은 알림톡 대상 아님
+
+                if filter_start_dt or filter_end_dt:
+                    _odt = parse_order_datetime_obj(md.get("주문날짜", ""))
+                    if _odt:
+                        if filter_start_dt and _odt < filter_start_dt:
+                            continue
+                        if filter_end_dt and _odt > filter_end_dt:
+                            continue
+
+                hosp = clean_text(md.get("한의원명", "") or md.get("보내는분", "") or "")
+                memb = clean_text(md.get("회원명", "") or "")
+                if is_alimtalk_excluded(hosp, memb):
+                    excluded += 1
+                    continue
+
+                results.append({
+                    "seqno": str(seqno),
+                    "ordercode": clean_text(md.get("주문코드", "")),
+                    "hospital": hosp,
+                    "patient": clean_text(md.get("환자명", "")),
+                    "tracking": tracking,
+                    "order_date": clean_text(md.get("주문날짜", "")),
+                })
+            log(f"{page_no}페이지 누적 {len(results)}건")
+
+        update_progress(100, f"조회 완료 — 후보 {len(results)}건")
+        log(f"\n후보 {len(results)}건 (제외 한의원 {excluded}건)")
+        return results
+    except Exception as e:
+        log(f"✗ 조회 실패: {e}")
+        update_progress(100, f"오류: {e}")
+        return results
+    finally:
+        try:
+            if driver:
+                driver.quit()
+        except Exception:
+            pass
+
+
+def send_alimtalk_selected(targets: list, start_date: str = "", end_date: str = "",
+                           log_callback=None, progress_callback=None) -> dict:
+    """선택된 후보들에 알림톡 발송 (자체 드라이버로 로그인 후 실행)."""
+    def log(msg):
+        print(msg)
+        if log_callback:
+            log_callback(msg)
+
+    driver = None
+    try:
+        if progress_callback:
+            progress_callback(10, "로그인 중...")
+        _opts = Options()
+        _opts.add_argument("--start-maximized")
+        driver = webdriver.Chrome(options=_opts)
+        login_driver(driver, ADMIN_ID, ADMIN_PW)
+
+        if progress_callback:
+            progress_callback(30, f"알림톡 발송 중... ({len(targets)}건)")
+        log(f"[알림톡] 발송 시작 — {len(targets)}건")
+        for t in targets:
+            log(f"  · {t.get('hospital') or '-'} {t.get('patient') or ''} ({t.get('tracking') or '-'})")
+
+        res = send_alimtalk_for_seqnos(
+            driver, {str(t["seqno"]) for t in targets}, start_date, end_date, log=log)
+        if progress_callback:
+            progress_callback(100, f"완료 — {res['sent']}건 발송")
+        log(f"[알림톡] 발송 완료: {res['sent']}건")
+        return res
+    finally:
+        try:
+            if driver:
+                driver.quit()
+        except Exception:
+            pass
 
 
 def send_alimtalk_for_seqnos(driver, target_seqnos: set, start_date: str = "",
@@ -8372,6 +8514,183 @@ def launch_gui():
         threading.Thread(target=worker, daemon=True).start()
 
     delivery_run_btn.config(command=on_delivery_run)
+
+    # ── 알림톡 발송 (조회 → 선택 → 발송) ──
+    alim_lf = ttk.LabelFrame(tab2, text="알림톡 발송", padding=(8, 4))
+    alim_lf.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    alim_lf.columnconfigure(0, weight=1)
+    ttk.Label(alim_lf,
+              text="※ 위 조회 기간의 [발송] 상태 + 송장번호 있는 건을 조회해\n"
+                   "   목록에서 보낼 건만 골라 알림톡을 발송합니다.\n"
+                   "   제외: 고래한방·필한방·약손·굿니스·제민·태화당",
+              foreground="gray", font=("Malgun Gothic", 8), justify="left"
+              ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+    alim_action = ttk.Frame(alim_lf)
+    alim_action.grid(row=1, column=0, sticky="ew")
+    alim_cancel_event = threading.Event()
+    alim_cancel_btn = ttk.Button(alim_action, text="취소", state="disabled", width=7,
+                                 command=lambda: alim_cancel_event.set())
+    alim_cancel_btn.pack(side="right", padx=(4, 0))
+    alim_scan_btn = ttk.Button(alim_action, text="알림톡 대상 조회", width=16)
+    alim_scan_btn.pack(side="right")
+
+    def _open_alimtalk_dialog(cands, start_date, end_date):
+        """후보 목록 팝업 — 체크해서 고른 뒤 발송."""
+        top = tk.Toplevel(root)
+        top.title("알림톡 발송 대상 선택")
+        top.geometry("620x520")
+        top.transient(root)
+        top.grab_set()
+
+        ttk.Label(top, text=f"조회된 알림톡 대상 {len(cands)}건 — 보낼 건을 선택하세요 (행 클릭)",
+                  font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+
+        frame = ttk.Frame(top)
+        frame.pack(fill="both", expand=True, padx=12)
+        tree = ttk.Treeview(frame, columns=("chk", "hosp", "patient", "tracking", "date"),
+                            show="headings", selectmode="none")
+        for c, t, w, a in [("chk", "선택", 40, "center"), ("hosp", "한의원", 150, "w"),
+                           ("patient", "환자명", 80, "center"), ("tracking", "송장번호", 130, "center"),
+                           ("date", "주문일", 100, "center")]:
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor=a, stretch=(c == "hosp"))
+        tree.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        sb.pack(side="right", fill="y")
+        tree.config(yscrollcommand=sb.set)
+
+        checked = set()
+        for c in cands:
+            iid = tree.insert("", "end", values=(
+                "☑", c["hospital"], c["patient"], c["tracking"],
+                format_order_date_only(c["order_date"])))
+            checked.add(iid)   # 기본 전체 선택
+
+        def _toggle(ev):
+            iid = tree.identify_row(ev.y)
+            if not iid:
+                return
+            on = iid not in checked
+            if on:
+                checked.add(iid)
+            else:
+                checked.discard(iid)
+            v = list(tree.item(iid, "values"))
+            v[0] = "☑" if on else "☐"
+            tree.item(iid, values=v)
+            _refresh()
+        tree.bind("<Button-1>", _toggle)
+
+        btm = ttk.Frame(top)
+        btm.pack(fill="x", padx=12, pady=10)
+
+        def _set_all(on):
+            for iid in tree.get_children():
+                if on:
+                    checked.add(iid)
+                else:
+                    checked.discard(iid)
+                v = list(tree.item(iid, "values"))
+                v[0] = "☑" if on else "☐"
+                tree.item(iid, values=v)
+            _refresh()
+
+        ttk.Button(btm, text="전체선택", width=9, command=lambda: _set_all(True)).pack(side="left")
+        ttk.Button(btm, text="전체해제", width=9, command=lambda: _set_all(False)).pack(side="left", padx=(4, 0))
+        cnt_lbl = ttk.Label(btm, text="")
+        cnt_lbl.pack(side="left", padx=(10, 0))
+
+        def _refresh():
+            cnt_lbl.config(text=f"선택 {len(checked)}건 / 전체 {len(cands)}건")
+        _refresh()
+
+        def _do_send():
+            ids = tree.get_children()
+            picked = [cands[i] for i, iid in enumerate(ids) if iid in checked]
+            if not picked:
+                messagebox.showwarning("선택 없음", "발송할 대상을 선택해주세요.", parent=top)
+                return
+            if not messagebox.askyesno(
+                "알림톡 발송 확인",
+                f"선택한 {len(picked)}건에 알림톡을 실제로 발송합니다.\n진행할까요?",
+                parent=top,
+            ):
+                return
+            top.grab_release()
+            top.destroy()
+
+            _global_running.set()
+            alim_scan_btn.config(state="disabled")
+
+            def worker():
+                try:
+                    send_alimtalk_selected(
+                        picked, start_date, end_date,
+                        log_callback=append_log, progress_callback=delivery_gui_progress)
+                    root.after(0, lambda n=len(picked): messagebox.showinfo(
+                        "알림톡 발송 완료", f"{n}건 처리했어요.\n로그에서 결과를 확인해주세요."))
+                except Exception as ex:
+                    root.after(0, lambda m=str(ex): messagebox.showerror("알림톡 발송 실패", m))
+                finally:
+                    _global_running.clear()
+                    root.after(0, lambda: alim_scan_btn.config(state="normal"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ttk.Button(btm, text="닫기", width=8,
+                   command=lambda: (top.grab_release(), top.destroy())).pack(side="right")
+        ttk.Button(btm, text="선택 항목 알림톡 발송", width=20,
+                   command=_do_send).pack(side="right", padx=(0, 4))
+
+    def on_alim_scan():
+        if _global_running.is_set():
+            messagebox.showwarning("실행 중", "다른 작업이 실행 중입니다.\n완료 후 다시 시도해주세요.")
+            return
+        if not ensure_admin_credentials(root):
+            return
+        try:
+            start_date = normalize_date_input(" ".join(filter(None, [
+                _ph_get(d_start_date_entry), _ph_get(d_start_time_entry)])))
+            end_date = normalize_date_input(" ".join(filter(None, [
+                _ph_get(d_end_date_entry), _ph_get(d_end_time_entry)])))
+        except ValueError as e:
+            messagebox.showerror("입력 오류", str(e))
+            return
+        if not start_date and not end_date:
+            if not messagebox.askyesno("전체 조회 확인",
+                                       "조회 기간이 비어 있습니다. 전체를 조회하면 오래 걸릴 수 있어요.\n계속할까요?"):
+                return
+
+        alim_cancel_event.clear()
+        _global_running.set()
+        alim_scan_btn.config(state="disabled")
+        alim_cancel_btn.config(state="normal")
+
+        def worker():
+            try:
+                cands = scan_alimtalk_candidates(
+                    start_date, end_date,
+                    log_callback=append_log, progress_callback=delivery_gui_progress,
+                    cancel_check=lambda: alim_cancel_event.is_set())
+                if alim_cancel_event.is_set():
+                    return
+                if not cands:
+                    root.after(0, lambda: messagebox.showinfo(
+                        "조회 결과 없음",
+                        "알림톡 대상이 없어요.\n(발송 상태 + 송장번호 있는 건 중 제외 한의원을 뺀 결과)"))
+                    return
+                root.after(0, lambda c=cands: _open_alimtalk_dialog(c, start_date, end_date))
+            except Exception as ex:
+                root.after(0, lambda m=str(ex): messagebox.showerror("조회 실패", m))
+            finally:
+                _global_running.clear()
+                root.after(0, lambda: alim_scan_btn.config(state="normal"))
+                root.after(0, lambda: alim_cancel_btn.config(state="disabled"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    alim_scan_btn.config(command=on_alim_scan)
 
     # ── 벌크 발송처리 ──
     bulk_frame = ttk.LabelFrame(tab2, text="벌크 발송처리 (고래한방 · 스캔 기반)", padding=(8, 4))
