@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -8694,7 +8694,7 @@ def launch_gui():
 
     # ── 벌크 발송처리 ──
     bulk_frame = ttk.LabelFrame(tab2, text="벌크 발송처리 (고래한방 · 스캔 기반)", padding=(8, 4))
-    bulk_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    bulk_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
     bulk_frame.columnconfigure(1, weight=1)
 
     _bulk_scan_result = {}
@@ -8992,7 +8992,7 @@ def launch_gui():
 
     # ── 약속처방 송장번호 입력 ──
     sp_delivery_lf = ttk.LabelFrame(tab2, text="약속처방 송장번호 입력", padding=(8, 4))
-    sp_delivery_lf.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    sp_delivery_lf.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 6))
     sp_delivery_lf.columnconfigure(0, weight=1)
 
     sp_detail_path_var = tk.StringVar()
@@ -9097,28 +9097,28 @@ def launch_gui():
 
     # ── 공유 상태창 + 진행바 (세 섹션 모두 여기 출력) ──
     delivery_status_label = ttk.Label(tab2, text="대기 중", foreground="blue")
-    delivery_status_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 2))
+    delivery_status_label.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 2))
 
     delivery_progress_var = tk.IntVar(value=0)
     delivery_progress_bar = ttk.Progressbar(
         tab2, orient="horizontal", length=300,
         mode="determinate", maximum=100, variable=delivery_progress_var
     )
-    delivery_progress_bar.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+    delivery_progress_bar.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
     # ── 로그창 ──
     log_text = tk.Text(tab2, height=7, width=50, state="disabled", font=("Malgun Gothic", 9))
-    log_text.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(4, 4))
+    log_text.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=(4, 4))
 
     log_scroll = ttk.Scrollbar(tab2, orient="vertical", command=log_text.yview)
-    log_scroll.grid(row=6, column=2, sticky="ns")
+    log_scroll.grid(row=7, column=2, sticky="ns")
     log_text.config(yscrollcommand=log_scroll.set)
 
     def _log_scroll_wheel(event):
         log_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
     log_text.bind("<MouseWheel>", _log_scroll_wheel)
-    tab2.rowconfigure(6, weight=1)
+    tab2.rowconfigure(7, weight=1)
 
     # ===== 탭 3: 배송완료 전환 =====
     tab3 = ttk.Frame(notebook, padding=12)
