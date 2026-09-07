@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3889,10 +3889,15 @@ DELIVERY_TARGET_STATUSES = ["접수대기", "입금대기", "조제중", "탕전
 ALIMTALK_SENT_MARKERS = ["발송", "전송", "완료", "성공"]
 
 
+# 목록 머리글에서 '메세지' 열을 찾을 때 허용할 표기들
+ALIMTALK_MSG_HEADERS = ["메세지", "메시지", "알림톡", "문자"]
+
+
 def find_msg_column_index(soup) -> int:
     """목록 머리글에서 '메세지' 열의 인덱스를 찾는다. 못 찾으면 -1.
 
     class 만으로는 다른 칸과 구분되지 않으므로 머리글 텍스트로 위치를 특정한다.
+    표기 흔들림(메세지/메시지 등)에 대비해 여러 후보를 허용한다.
     """
     try:
         for row in soup.find_all("tr"):
@@ -3900,8 +3905,12 @@ def find_msg_column_index(soup) -> int:
             if not cells:
                 continue
             texts = [clean_text(c.get_text()) for c in cells]
-            if "메세지" in texts and ("주문번호" in texts or "처방명" in texts):
-                return texts.index("메세지")
+            # 머리글 행인지 확인 (주문 목록 헤더 특징)
+            if not ("주문번호" in texts or "처방명" in texts):
+                continue
+            for i, t in enumerate(texts):
+                if t in ALIMTALK_MSG_HEADERS:
+                    return i
     except Exception:
         pass
     return -1
@@ -3989,6 +3998,8 @@ def scan_alimtalk_candidates(start_date: str = "", end_date: str = "",
         log(f"알림톡 후보 조회 — 기간: {start_date or '전체'} ~ {end_date or '전체'} (발송 상태)")
 
         seen = set()
+        _msg_col_logged = False   # '메세지' 열 인식 결과를 1회만 로그
+        _MSG_CHECK = True
         for page_no in range(1, MAX_PAGE_SAFETY_LIMIT + 1):
             if cancel_check and cancel_check():
                 log("⛔ 취소됨")
@@ -4000,6 +4011,17 @@ def scan_alimtalk_candidates(start_date: str = "", end_date: str = "",
             detail_rows = collect_detail_links_on_current_page(driver, wait)
             if not detail_rows:
                 break
+
+            # '메세지' 열을 제대로 집었는지 첫 페이지에서 확인용 로그
+            if not _msg_col_logged:
+                _msg_col_logged = True
+                _idx = find_msg_column_index(BeautifulSoup(driver.page_source, "html.parser"))
+                if _idx >= 0:
+                    log(f"[확인] '메세지' 열 인식됨 — 머리글 {_idx + 1}번째 칸")
+                else:
+                    log("[확인] ⚠ 머리글에서 '메세지' 열을 못 찾음 → 체크박스 앞칸으로 대체 판독")
+                _samples = [clean_text(r.get('msg_cell', '')) or '(빈칸)' for r in detail_rows[:5]]
+                log(f"[확인] 메세지 칸 샘플: {_samples}")
 
             for item in detail_rows:
                 if cancel_check and cancel_check():
