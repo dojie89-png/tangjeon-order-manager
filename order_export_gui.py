@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -1519,6 +1519,7 @@ def collect_detail_links_on_current_page(driver, wait):
     soup = BeautifulSoup(driver.page_source, "html.parser")
     detail_rows = []
     seen_hrefs = set()
+    _msg_idx = find_msg_column_index(soup)   # '메세지' 열 위치 (알림톡 발송 표시)
     for row in soup.find_all("tr"):
         try:
             target_link = None
@@ -1557,6 +1558,7 @@ def collect_detail_links_on_current_page(driver, wait):
                 "href": href,
                 "row_date": row_date,
                 "row_text": clean_text(row.get_text()),  # 한의원명 등 전체 행 텍스트
+                "msg_cell": extract_alimtalk_msg_cell(row, _msg_idx),  # '메세지' 칸 (알림톡 발송 표시)
             })
         except Exception:
             continue
@@ -3880,6 +3882,63 @@ DELIVERY_TARGET_STATUSES = ["접수대기", "입금대기", "조제중", "탕전
 
 # ---------- 알림톡 ----------
 # 알림톡을 보내지 않을 한의원 (한의원명·보내는분·회원명 중 하나라도 포함되면 제외)
+# 목록의 '메세지' 칸에 이 글자가 있으면 이미 알림톡을 보낸 건으로 본다.
+#   <td class="linetr" align="center">발송</td>
+# ★ 진행상태 열도 값이 '발송'이라 행 전체 텍스트로 판별하면 안 되고,
+#   반드시 '메세지' 칸만 집어서 봐야 한다.
+ALIMTALK_SENT_MARKERS = ["발송", "전송", "완료", "성공"]
+
+
+def find_msg_column_index(soup) -> int:
+    """목록 머리글에서 '메세지' 열의 인덱스를 찾는다. 못 찾으면 -1.
+
+    class 만으로는 다른 칸과 구분되지 않으므로 머리글 텍스트로 위치를 특정한다.
+    """
+    try:
+        for row in soup.find_all("tr"):
+            cells = row.find_all(["th", "td"])
+            if not cells:
+                continue
+            texts = [clean_text(c.get_text()) for c in cells]
+            if "메세지" in texts and ("주문번호" in texts or "처방명" in texts):
+                return texts.index("메세지")
+    except Exception:
+        pass
+    return -1
+
+
+def extract_alimtalk_msg_cell(row, msg_idx: int = -1) -> str:
+    """목록 행(tr)에서 '메세지' 칸 텍스트를 반환. 못 찾으면 빈 문자열.
+
+    1순위: 머리글로 찾은 열 인덱스(msg_idx)
+    2순위: 선택 체크박스(input[name=check]) 칸의 직전 <td>
+    """
+    try:
+        tds = row.find_all("td")
+        if not tds:
+            return ""
+        if 0 <= msg_idx < len(tds):
+            return clean_text(tds[msg_idx].get_text())
+        chk_idx = -1
+        for i, td in enumerate(tds):
+            if td.find("input", attrs={"name": "check"}):
+                chk_idx = i
+                break
+        if chk_idx <= 0:
+            return ""
+        return clean_text(tds[chk_idx - 1].get_text())
+    except Exception:
+        return ""
+
+
+def is_alimtalk_already_sent(msg_cell_text: str) -> bool:
+    """'메세지' 칸 값으로 알림톡 기발송 여부 판정."""
+    t = clean_text(str(msg_cell_text or ""))
+    if not t:
+        return False
+    return any(m in t for m in ALIMTALK_SENT_MARKERS)
+
+
 ALIMTALK_EXCLUDE_KEYWORDS = [
     "고래",      # 고래한방병원 4곳 (관저·판암·세종·오창)
     "필한방",    # 필한방병원 3곳 (대전·청주·성동)
@@ -3973,6 +4032,7 @@ def scan_alimtalk_candidates(start_date: str = "", end_date: str = "",
                     excluded += 1
                     continue
 
+                _msg = clean_text(item.get("msg_cell", ""))
                 results.append({
                     "seqno": str(seqno),
                     "ordercode": clean_text(md.get("주문코드", "")),
@@ -3980,6 +4040,8 @@ def scan_alimtalk_candidates(start_date: str = "", end_date: str = "",
                     "patient": clean_text(md.get("환자명", "")),
                     "tracking": tracking,
                     "order_date": clean_text(md.get("주문날짜", "")),
+                    "msg_cell": _msg,
+                    "already_sent": is_alimtalk_already_sent(_msg),
                 })
             log(f"{page_no}페이지 누적 {len(results)}건")
 
@@ -8543,18 +8605,26 @@ def launch_gui():
         top.transient(root)
         top.grab_set()
 
+        _sent_n = sum(1 for c in cands if c.get("already_sent"))
         ttk.Label(top, text=f"조회된 알림톡 대상 {len(cands)}건 — 보낼 건을 선택하세요 (행 클릭)",
-                  font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+                  font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 2))
+        ttk.Label(top,
+                  text=(f"※ 이미 발송된 {_sent_n}건은 중복 방지를 위해 선택 해제돼 있어요 (회색 표시)."
+                        if _sent_n else "※ 이미 발송된 건은 자동으로 선택 해제됩니다."),
+                  foreground="gray").pack(anchor="w", padx=12, pady=(0, 6))
 
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=12)
-        tree = ttk.Treeview(frame, columns=("chk", "hosp", "patient", "tracking", "date"),
+        tree = ttk.Treeview(frame, columns=("chk", "sent", "hosp", "patient", "tracking", "date"),
                             show="headings", selectmode="none")
-        for c, t, w, a in [("chk", "선택", 40, "center"), ("hosp", "한의원", 150, "w"),
-                           ("patient", "환자명", 80, "center"), ("tracking", "송장번호", 130, "center"),
-                           ("date", "주문일", 100, "center")]:
+        for c, t, w, a in [("chk", "선택", 40, "center"), ("sent", "발송여부", 70, "center"),
+                           ("hosp", "한의원", 140, "w"),
+                           ("patient", "환자명", 75, "center"), ("tracking", "송장번호", 125, "center"),
+                           ("date", "주문일", 95, "center")]:
             tree.heading(c, text=t)
             tree.column(c, width=w, anchor=a, stretch=(c == "hosp"))
+        # 이미 보낸 건은 회색으로 구분
+        tree.tag_configure("sent", foreground="#999999")
         tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         sb.pack(side="right", fill="y")
@@ -8562,10 +8632,16 @@ def launch_gui():
 
         checked = set()
         for c in cands:
+            _sent = bool(c.get("already_sent"))
             iid = tree.insert("", "end", values=(
-                "☑", c["hospital"], c["patient"], c["tracking"],
-                format_order_date_only(c["order_date"])))
-            checked.add(iid)   # 기본 전체 선택
+                "☐" if _sent else "☑",
+                "발송됨" if _sent else "-",
+                c["hospital"], c["patient"], c["tracking"],
+                format_order_date_only(c["order_date"])),
+                tags=("sent",) if _sent else ())
+            # 이미 보낸 건은 중복 방지를 위해 기본 선택 해제
+            if not _sent:
+                checked.add(iid)
 
         def _toggle(ev):
             iid = tree.identify_row(ev.y)
@@ -8611,9 +8687,14 @@ def launch_gui():
             if not picked:
                 messagebox.showwarning("선택 없음", "발송할 대상을 선택해주세요.", parent=top)
                 return
+            dup = [p for p in picked if p.get("already_sent")]
+            _warn = (f"\n\n⚠ 이 중 {len(dup)}건은 이미 발송된 건입니다 "
+                     f"(중복 발송됩니다):\n" +
+                     "\n".join(f"  · {d.get('hospital','-')} {d.get('patient','')}" for d in dup[:5]) +
+                     ("\n  ..." if len(dup) > 5 else "")) if dup else ""
             if not messagebox.askyesno(
                 "알림톡 발송 확인",
-                f"선택한 {len(picked)}건에 알림톡을 실제로 발송합니다.\n진행할까요?",
+                f"선택한 {len(picked)}건에 알림톡을 실제로 발송합니다.{_warn}\n\n진행할까요?",
                 parent=top,
             ):
                 return
