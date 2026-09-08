@@ -1,5 +1,5 @@
 {
-  "seedVersion": 20260811,
+  "seedVersion": 20260908,
   "designs": {
     "탕전라벨 기본": {
       "presetId": "A6_TAG_4UP",
@@ -5919,7 +5919,8 @@
           "id": "patient_name_1777511172587_0_uucr",
           "suffixText": "",
           "dataKey": "처방명",
-          "layerName": "처방명"
+          "layerName": "처방명",
+          "autoBracket": false
         },
         {
           "type": "excel_text",
@@ -5989,7 +5990,8 @@
           "color": "#000000",
           "suffixText": "",
           "dataKey": "처방명",
-          "layerName": "처방명"
+          "layerName": "처방명",
+          "autoBracket": false
         },
         {
           "id": "pack_count_1777392501317_8s2h",
@@ -6077,7 +6079,8 @@
           "color": "#000000",
           "suffixText": "",
           "dataKey": "처방명",
-          "layerName": "처방명"
+          "layerName": "처방명",
+          "autoBracket": false
         },
         {
           "id": "pack_count_1777392501317_8s2h",
@@ -6165,7 +6168,8 @@
           "color": "#000000",
           "suffixText": "",
           "dataKey": "처방명",
-          "layerName": "처방명"
+          "layerName": "처방명",
+          "autoBracket": false
         },
         {
           "id": "pack_count_1777392501317_8s2h",
