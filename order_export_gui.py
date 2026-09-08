@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4889,12 +4889,21 @@ def run_bulk_ship(branch_groups: dict, tracking_by_group: dict,
         prog(5, "로그인 중...")
         login_driver(driver, ADMIN_ID, ADMIN_PW)
 
+        # 그룹ID 매칭 — 공백·대소문자 등 사소한 표기 차이는 흡수
+        def _gid_key(s: str) -> str:
+            return re.sub(r"\s+", "", clean_text(str(s or ""))).lower()
+
+        _tracking_norm = {_gid_key(k): v for k, v in tracking_by_group.items()}
+
         all_jobs = []
+        _all_gids = []
         for branch in GORAE_BRANCHES + ["기타"]:
             groups = branch_groups.get(branch, [])
             for gi, group in enumerate(groups, start=1):
                 group_id = f"고래{branch}_{gi}"
-                tracking = normalize_tracking_no(tracking_by_group.get(group_id, ""))
+                _all_gids.append(group_id)
+                tracking = normalize_tracking_no(
+                    tracking_by_group.get(group_id) or _tracking_norm.get(_gid_key(group_id), ""))
                 if not tracking:
                     log(f"⚠ {group_id}: 운송장 번호 없음, 스킵")
                     continue
@@ -4903,9 +4912,20 @@ def run_bulk_ship(branch_groups: dict, tracking_by_group: dict,
 
         total = len(all_jobs)
         if total == 0:
+            # 매칭 실패 원인을 바로 알 수 있게 양쪽 키를 모두 출력
             log("처리할 주문이 없습니다.")
+            log(f"  · 스캔 그룹 ID ({len(_all_gids)}개): {_all_gids}")
+            log(f"  · CJ 파일에서 읽은 고객주문번호 ({len(tracking_by_group)}개): {list(tracking_by_group.keys())}")
+            log("  → 위 두 값이 일치해야 발송처리가 됩니다. 서로 다르면 CJ 파일의")
+            log("     '고객주문번호' 열이 [CJ 양식 생성]으로 만든 값과 다른 것입니다.")
             prog(100, "완료")
-            raise NoWorkFound("발송 처리할 벌크 주문이 없어요.")
+            raise NoWorkFound(
+                "발송 처리할 벌크 주문이 없어요.\n\n"
+                f"스캔 그룹: {_all_gids[:5]}{' ...' if len(_all_gids) > 5 else ''}\n"
+                f"CJ 파일 값: {list(tracking_by_group.keys())[:5]}"
+                f"{' ...' if len(tracking_by_group) > 5 else ''}\n\n"
+                "두 값이 일치하지 않습니다. 로그를 확인해주세요."
+            )
 
         success, fail = 0, 0
         for i, job in enumerate(all_jobs):
@@ -9059,16 +9079,34 @@ def launch_gui():
         if cj_file and os.path.exists(cj_file):
             try:
                 df_cj = pd.read_excel(cj_file, header=0, dtype=str)
-                tracking_col = next((c for c in df_cj.columns if "운송장번호" in clean_text(str(c))), None)
-                ordercode_col = next((c for c in df_cj.columns if "고객주문번호" in clean_text(str(c))), None)
+                # 컬럼명 표기 차이(공백 등) 흡수
+                def _colkey(c):
+                    return re.sub(r"\s+", "", clean_text(str(c)))
+                tracking_col = next(
+                    (c for c in df_cj.columns if "운송장번호" in _colkey(c)), None)
+                ordercode_col = next(
+                    (c for c in df_cj.columns if "고객주문번호" in _colkey(c)), None)
+                if not ordercode_col:   # 폴백: '주문번호' 가 들어간 컬럼
+                    ordercode_col = next(
+                        (c for c in df_cj.columns if "주문번호" in _colkey(c)), None)
                 if not tracking_col:
                     messagebox.showerror("오류", "CJ 파일에서 운송장번호 컬럼을 찾을 수 없어요.")
                     return
+                if not ordercode_col:
+                    messagebox.showerror(
+                        "오류",
+                        "CJ 파일에서 '고객주문번호' 컬럼을 찾을 수 없어요.\n\n"
+                        f"찾은 컬럼: {list(df_cj.columns)}\n\n"
+                        "[CJ 양식 생성]으로 만든 파일을 대한통운에 올린 뒤\n"
+                        "받은 파일을 그대로 첨부해주세요.")
+                    return
                 for _, row in df_cj.iterrows():
                     t = normalize_tracking_no(str(row.get(tracking_col, "")))
-                    gid = clean_text(str(row.get(ordercode_col, ""))) if ordercode_col else ""
-                    if t and gid:
+                    gid = clean_text(str(row.get(ordercode_col, "")))
+                    if t and gid and gid.lower() != "nan":
                         tracking_by_group[gid] = t
+                append_log(f"[CJ파일] 운송장 {len(tracking_by_group)}개 읽음 "
+                           f"(고객주문번호 예: {list(tracking_by_group.keys())[:3]})")
                 bk_status_label.config(text=f"CJ 파일에서 {len(tracking_by_group)}개 운송장 읽음")
             except Exception as e:
                 messagebox.showerror("파일 오류", str(e))
@@ -9098,6 +9136,7 @@ def launch_gui():
         def worker():
             try:
                 run_bulk_ship(branch_groups_for_ship, tracking_by_group,
+                              log_callback=append_log,
                               progress_callback=bk_prog,
                               cancel_check=bk_cancel_event.is_set)
                 if bk_cancel_event.is_set():
