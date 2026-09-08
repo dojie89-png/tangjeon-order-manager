@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "18.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -9092,23 +9092,52 @@ def launch_gui():
                     ordercode_col = next(
                         (c for c in df_cj.columns if "주문번호" in _colkey(c)), None)
                 if not tracking_col:
-                    messagebox.showerror("오류", "CJ 파일에서 운송장번호 컬럼을 찾을 수 없어요.")
-                    return
-                if not ordercode_col:
                     messagebox.showerror(
                         "오류",
-                        "CJ 파일에서 '고객주문번호' 컬럼을 찾을 수 없어요.\n\n"
-                        f"찾은 컬럼: {list(df_cj.columns)}\n\n"
-                        "[CJ 양식 생성]으로 만든 파일을 대한통운에 올린 뒤\n"
-                        "받은 파일을 그대로 첨부해주세요.")
+                        "CJ 파일에서 운송장번호 컬럼을 찾을 수 없어요.\n\n"
+                        f"찾은 컬럼: {list(df_cj.columns)[:12]} ...")
                     return
+                # 고객주문번호가 없어도 아래에서 지점명으로 매칭하므로 중단하지 않음
+                # 1) 고객주문번호가 그룹ID(고래관저_1 등)인 경우 — 우리 양식으로 접수한 파일
                 for _, row in df_cj.iterrows():
                     t = normalize_tracking_no(str(row.get(tracking_col, "")))
-                    gid = clean_text(str(row.get(ordercode_col, "")))
+                    gid = clean_text(str(row.get(ordercode_col, ""))) if ordercode_col else ""
                     if t and gid and gid.lower() != "nan":
                         tracking_by_group[gid] = t
+
+                # 2) 그룹ID가 하나도 안 맞으면 받는분·주소의 지점명으로 매칭
+                #    (양식 생성 없이 직접 접수한 파일 대응 — 고객주문번호가 '14포장' 등)
+                _scan_gids = {f"고래{b}_{i+1}"
+                              for b in GORAE_BRANCHES + ["기타"]
+                              for i in range(len(branch_groups_for_ship.get(b, [])))}
+                if not (set(tracking_by_group) & _scan_gids):
+                    recv_col = next((c for c in df_cj.columns if "받는분" == _colkey(c)), None)
+                    addr_col = next((c for c in df_cj.columns if "받는분주소" in _colkey(c)), None)
+                    by_branch: dict = {}
+                    for _, row in df_cj.iterrows():
+                        t = normalize_tracking_no(str(row.get(tracking_col, "")))
+                        if not t:
+                            continue
+                        hay = clean_text(" ".join([
+                            str(row.get(recv_col, "") or "") if recv_col else "",
+                            str(row.get(addr_col, "") or "") if addr_col else "",
+                        ]))
+                        for b in GORAE_BRANCHES:
+                            if b in hay:
+                                by_branch.setdefault(b, []).append(t)
+                                break
+                    if by_branch:
+                        tracking_by_group = {}
+                        for b, nums in by_branch.items():
+                            for gi, num in enumerate(nums, start=1):
+                                tracking_by_group[f"고래{b}_{gi}"] = num
+                        append_log("[CJ파일] 고객주문번호에 그룹ID가 없어 "
+                                   "받는분/주소의 지점명으로 매칭했어요.")
+                        append_log(f"          지점별 운송장 수: "
+                                   f"{ {b: len(v) for b, v in by_branch.items()} }")
+
                 append_log(f"[CJ파일] 운송장 {len(tracking_by_group)}개 읽음 "
-                           f"(고객주문번호 예: {list(tracking_by_group.keys())[:3]})")
+                           f"(매칭 키 예: {list(tracking_by_group.keys())[:3]})")
                 bk_status_label.config(text=f"CJ 파일에서 {len(tracking_by_group)}개 운송장 읽음")
             except Exception as e:
                 messagebox.showerror("파일 오류", str(e))
