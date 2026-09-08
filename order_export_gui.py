@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3893,6 +3893,21 @@ ALIMTALK_SENT_MARKERS = ["발송", "전송", "완료", "성공"]
 ALIMTALK_MSG_HEADERS = ["메세지", "메시지", "알림톡", "문자"]
 
 
+def get_list_header_texts(soup) -> list:
+    """주문 목록의 머리글 행 텍스트 목록을 반환 (확인·디버깅용). 못 찾으면 []."""
+    try:
+        for row in soup.find_all("tr"):
+            cells = row.find_all(["th", "td"])
+            if not cells:
+                continue
+            texts = [clean_text(c.get_text()) for c in cells]
+            if "주문번호" in texts or "처방명" in texts:
+                return texts
+    except Exception:
+        pass
+    return []
+
+
 def find_msg_column_index(soup) -> int:
     """목록 머리글에서 '메세지' 열의 인덱스를 찾는다. 못 찾으면 -1.
 
@@ -4015,9 +4030,14 @@ def scan_alimtalk_candidates(start_date: str = "", end_date: str = "",
             # '메세지' 열을 제대로 집었는지 첫 페이지에서 확인용 로그
             if not _msg_col_logged:
                 _msg_col_logged = True
-                _idx = find_msg_column_index(BeautifulSoup(driver.page_source, "html.parser"))
+                _soup_hdr = BeautifulSoup(driver.page_source, "html.parser")
+                _idx = find_msg_column_index(_soup_hdr)
                 if _idx >= 0:
-                    log(f"[확인] '메세지' 열 인식됨 — 머리글 {_idx + 1}번째 칸")
+                    # 인식한 칸이 정말 '메세지'인지 머리글 전체와 함께 보여준다
+                    _hdrs = get_list_header_texts(_soup_hdr)
+                    _picked = _hdrs[_idx] if 0 <= _idx < len(_hdrs) else "?"
+                    log(f"[확인] '메세지' 열 인식됨 — {_idx + 1}번째 칸 = '{_picked}'")
+                    log(f"[확인] 머리글 전체: {_hdrs}")
                 else:
                     log("[확인] ⚠ 머리글에서 '메세지' 열을 못 찾음 → 체크박스 앞칸으로 대체 판독")
                 _samples = [clean_text(r.get('msg_cell', '')) or '(빈칸)' for r in detail_rows[:5]]
