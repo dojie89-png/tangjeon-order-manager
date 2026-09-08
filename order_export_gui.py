@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4859,7 +4859,9 @@ def build_bulk_cj_upload_df(branch_groups: dict) -> pd.DataFrame:
                 sender_info.get("name", f"고래한방병원_{branch}"),    # K 보내는분성명
                 sender_info.get("phone", ""),                         # L 보내는분전화번호
                 sender_info.get("address", ""),                       # M 보내는분주소
-                "",                                                   # N 배송메시지
+                "",                                                   # N 배송메세지1
+                # O 묶음여부 — 벌크는 그룹 단위 발송이므로 2건 이상이면 묶음 표시
+                "묶음" if len(group) > 1 else "",
             ])
     return pd.DataFrame(rows, columns=_CJ_COLUMNS)
 
