@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "17.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "17.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3934,23 +3934,33 @@ def find_msg_column_index(soup) -> int:
 def extract_alimtalk_msg_cell(row, msg_idx: int = -1) -> str:
     """목록 행(tr)에서 '메세지' 칸 텍스트를 반환. 못 찾으면 빈 문자열.
 
-    1순위: 머리글로 찾은 열 인덱스(msg_idx)
-    2순위: 선택 체크박스(input[name=check]) 칸의 직전 <td>
+    실제 목록 행 구조 (총 15칸):
+      1 주문번호 / 2 처방명 / 3 주문자 / 4 등급 / 5 복용자 / 6 한의원명 /
+      7 금액 / 8 입금(select) / 9 결제방법 / 10 계산서 / 11 주문일 /
+      12 진행상태(select name=order_ing..) / 13 송장 / 14 메세지 / 15 선택(checkbox)
+
+    ★ 진행상태는 <select> 안에 있고 메세지는 순수 텍스트라 구조가 다르다.
+      선택 체크박스가 마지막 칸이므로 그 직전 칸이 메세지 → 이 방식이 가장 확실.
+    1순위: 체크박스 칸의 직전 <td>
+    2순위: 머리글로 찾은 열 인덱스(msg_idx)
     """
     try:
         tds = row.find_all("td")
         if not tds:
             return ""
-        if 0 <= msg_idx < len(tds):
-            return clean_text(tds[msg_idx].get_text())
         chk_idx = -1
         for i, td in enumerate(tds):
             if td.find("input", attrs={"name": "check"}):
                 chk_idx = i
                 break
-        if chk_idx <= 0:
-            return ""
-        return clean_text(tds[chk_idx - 1].get_text())
+        if chk_idx > 0:
+            cell = tds[chk_idx - 1]
+            # 방어: 혹시 그 칸이 select(진행상태)면 잘못 잡은 것이므로 폴백
+            if not cell.find("select"):
+                return clean_text(cell.get_text())
+        if 0 <= msg_idx < len(tds):
+            return clean_text(tds[msg_idx].get_text())
+        return ""
     except Exception:
         return ""
 
