@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "18.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "18.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4590,7 +4590,24 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
 
 
 # ---------- 벌크 발송처리 ----------
-BULK_BOX_SIZE = 11      # 한 박스당 주문 수
+BULK_BOX_SIZE = 11      # 한 박스에 꽉 채워 보낼 수 있는 최대 주문 수
+
+
+def split_bulk_boxes(orders: list, box_size: int = BULK_BOX_SIZE) -> list:
+    """벌크 주문을 박스 단위로 분할.
+
+    실무 규칙: box_size(기본 11)개까지는 한 박스에 꽉 채워 보내고,
+    그보다 많으면 (box_size - 1)개씩 담고 나머지를 마지막 박스에 넣는다.
+      11개 → [11]
+      12개 → [10, 2]
+      15개 → [10, 5]
+      21개 → [10, 10, 1]
+    """
+    n = len(orders)
+    if n <= box_size:
+        return [orders] if n else []
+    per = max(1, box_size - 1)
+    return [orders[i:i + per] for i in range(0, n, per)]
 BULK_SCAN_STATUSES = ["접수대기", "조제중", "탕전중"]
 GORAE_BRANCHES = ["관저", "판암", "세종", "오창"]
 
@@ -8906,7 +8923,7 @@ def launch_gui():
     def _make_branch_groups(scan_result: dict, box_size: int) -> dict:
         """flat 스캔 결과를 박스 크기 기준으로 그룹핑"""
         return {
-            b: [orders[i:i + box_size] for i in range(0, len(orders), box_size)]
+            b: split_bulk_boxes(orders, box_size)
             for b, orders in scan_result.items() if orders
         }
 
