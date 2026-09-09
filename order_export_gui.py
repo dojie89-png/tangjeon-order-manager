@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "18.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "18.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2028,6 +2028,7 @@ TANGJEON_ROOM_NAME_MAP = {
         "익기보혈탕": "보중익기탕",
         "익기부자탕": "보중익기탕",
         "소경활혈탕": "소경활혈탕",
+        "소경지통탕": "소경활혈탕",
     },
 }
 
