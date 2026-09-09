@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "18.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "18.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2114,6 +2114,7 @@ GORAE_PANAK_CODE_MAP = {
     "오적산": "OJS",
     "오적산 제1가감": "OJS1",
     "오적산 제2가감": "OJS2",
+    "오적산 제3가감": "OJS3",
 }
 
 
