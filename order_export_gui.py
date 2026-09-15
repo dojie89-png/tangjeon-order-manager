@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "18.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "18.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2387,7 +2387,7 @@ def export_label_excel(xlsx_path: str):
 
     # 열 순서 조정: 라벨코드 → 처방비고 → 벌크여부 → 박스번호 → 박스포장 → 파우치포장 → 묶음배송 → 합포여부 → 주소확인
     # (조제지시사항은 아래에서 항목별로 분리해 맨 오른쪽에 추가)
-    _tail_cols = ['처방비고', '처방명_탕전실용', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
+    _tail_cols = ['처방비고', '벌크여부', '박스번호', '박스포장', '파우치포장', '묶음배송', '합포여부', '주소확인']
     cols_order = list(label_df.columns)
     for col in _tail_cols:
         if col in cols_order:
@@ -2403,6 +2403,13 @@ def export_label_excel(xlsx_path: str):
             if _tail in label_df.columns:
                 cols_order.append(_tail)
     label_df = label_df[cols_order]
+
+    # 처방명_탕전실용은 처방명 바로 뒤에 배치 (두 이름을 나란히 비교하기 쉽게)
+    if '처방명_탕전실용' in label_df.columns and '처방명' in label_df.columns:
+        _order = list(label_df.columns)
+        _order.remove('처방명_탕전실용')
+        _order.insert(_order.index('처방명') + 1, '처방명_탕전실용')
+        label_df = label_df[_order]
 
     # 조제지시사항을 항목별로 분리 → 조제지시사항1, 2, 3... (맨 오른쪽).
     # 구분자: '/'(슬래시) 또는 '.'(마침표). 괄호 안 쉼표(예: "(아침,저녁)")는 보존.
