@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "18.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "19.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2122,8 +2122,29 @@ GORAE_PANAK_CODE_MAP = {
 }
 
 
+def highlight_addr_check_sheets(wb, columns: list):
+    """'주소확인' 값이 있는 행을 노란 배경 + 빨간 굵은 글씨로 강조 (워크북 전체 시트)"""
+    from openpyxl.styles import PatternFill, Font
+    if '주소확인' not in columns:
+        return
+    yellow       = PatternFill("solid", fgColor="FFFF00")
+    light_yellow = PatternFill("solid", fgColor="FFFFC0")
+    red_bold     = Font(bold=True, color="CC0000")
+    check_col    = list(columns).index('주소확인') + 1  # 1-based
+    for ws in wb.worksheets:
+        max_col = ws.max_column
+        for r in range(2, ws.max_row + 1):
+            cell = ws.cell(row=r, column=check_col)
+            if cell.value and str(cell.value).strip():
+                cell.fill = yellow
+                cell.font = red_bold
+                for c in range(1, max_col + 1):
+                    if c != check_col:
+                        ws.cell(row=r, column=c).fill = light_yellow
+
+
 # ---------- 라벨 인쇄용 정렬 / 시트 분리 ----------
-# 1번 시트는 주문 순서 그대로 유지(정산 대조용), 아래 시트들이 라벨 출력용 정렬본.
+# 정렬본(_정렬.xlsx)에서만 쓴다. 기본 다운로드 파일은 주문 순서를 유지한다.
 LABEL_SHEET_ALL  = "전체(주문순)"
 LABEL_SHEET_BULK = "벌크"
 LABEL_SHEET_DIR  = "직송"
@@ -2201,6 +2222,62 @@ def split_label_sheets(sorted_df: pd.DataFrame) -> dict:
     for name, _ in LABEL_PIL_SHEETS:
         out[name] = sorted_df[pil_masks[name]].reset_index(drop=True)
     return out
+
+
+def detect_sortable_kind(df: pd.DataFrame) -> str:
+    """업로드된 엑셀이 어떤 파일인지 판별 → 'cj' / 'label' / ''(알 수 없음)"""
+    cols = set(str(c).strip() for c in df.columns)
+    if {'상호', '보내는분성명', '품목명'} <= cols:
+        return 'cj'
+    if {'한의원_구분', '환자명'} <= cols and ('처방명_탕전실용' in cols or '벌크여부' in cols):
+        return 'label'
+    return ''
+
+
+def make_sorted_copy(src_path: str, log=print) -> str:
+    """다운로드한 택배/라벨 파일을 읽어 정렬한 '복사본'을 만든다.
+    원본은 손대지 않고 '{원본이름}_정렬.xlsx' 로 옆에 저장.
+      - 택배(CJ) : 상호 → 보내는분주소 → 품목명 순 정렬 (시트 1개)
+      - 라벨     : 벌크여부 → 한의원_구분 → 처방명_탕전실용 → 파우치용량 → 팩수 → 환자명 순
+                   정렬 후 전체(주문순)/벌크/직송/성동필/청주필/대전필 시트로 분리
+    반환: 저장한 파일 경로"""
+    src = Path(src_path)
+    if not src.exists():
+        raise FileNotFoundError(f"파일을 찾을 수 없어요: {src}")
+
+    df = pd.read_excel(str(src), sheet_name=0, dtype=str)
+    kind = detect_sortable_kind(df)
+    if not kind:
+        raise ValueError(
+            "택배(대한통운) 파일도, 탕전 라벨 인쇄용 파일도 아닌 것 같아요.\n"
+            f"첫 시트 열: {', '.join(str(c) for c in list(df.columns)[:10])} ...")
+
+    out_path = src.parent / f"{src.stem}_정렬.xlsx"
+
+    if kind == 'cj':
+        sorted_df = sort_cj_upload_df(df)
+        sorted_df.to_excel(str(out_path), index=False)
+        log(f"[정렬] 택배 파일 {len(sorted_df)}행 — 상호 → 보내는분주소 → 품목명")
+    else:
+        sorted_df = sort_label_df(df)
+        sheets = split_label_sheets(sorted_df)
+        with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
+            # 1번 시트는 원본(주문순) 그대로 — 정산 시 게시판 순서와 대조용
+            df.to_excel(writer, sheet_name=LABEL_SHEET_ALL, index=False)
+            for name, sdf in sheets.items():
+                sdf.to_excel(writer, sheet_name=name, index=False)
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(str(out_path))
+            highlight_addr_check_sheets(wb, list(df.columns))
+            wb.save(str(out_path))
+        except Exception as e:
+            log(f"[정렬] 주소확인 강조 실패: {e}")
+        log(f"[정렬] 라벨 파일 {len(df)}행 — " +
+            " / ".join(f"{n} {len(d)}건" for n, d in sheets.items()))
+
+    log(f"[정렬] 저장: {out_path}")
+    return str(out_path)
 
 
 def export_label_excel(xlsx_path: str):
@@ -2514,44 +2591,22 @@ def export_label_excel(xlsx_path: str):
     ts_prefix = ts_m.group(1) if ts_m else stem
     out_path = Path(xlsx_path).parent / f"{ts_prefix}_탕전 라벨 인쇄용.xlsx"
 
-    # 라벨 출력용 정렬 + 시트 분리
-    sorted_df = sort_label_df(label_df)
-    sheets = split_label_sheets(sorted_df)
+    # ※ 정렬·시트 분리는 여기서 하지 않는다. 기본 다운로드는 주문 순서 유지(정산 대조용).
+    #    정렬본이 필요하면 '파일 정렬' 버튼으로 별도 복사본을 만든다.
+    label_df.to_excel(str(out_path), index=False)
 
-    with pd.ExcelWriter(str(out_path), engine="openpyxl") as _writer:
-        # 1번 시트는 기존대로 주문 순서 유지 (정산 시 게시판 순서와 대조용)
-        label_df.to_excel(_writer, sheet_name=LABEL_SHEET_ALL, index=False)
-        for _name, _sdf in sheets.items():
-            _sdf.to_excel(_writer, sheet_name=_name, index=False)
-
-    # '주소확인' 값 있는 행 강조 (노란 배경) — 모든 시트에 동일 적용
+    # '주소확인' 값 있는 행 강조 (노란 배경)
     if '주소확인' in label_df.columns:
         try:
             import openpyxl
-            from openpyxl.styles import PatternFill, Font
             _wb = openpyxl.load_workbook(str(out_path))
-            _yellow       = PatternFill("solid", fgColor="FFFF00")
-            _light_yellow = PatternFill("solid", fgColor="FFFFC0")
-            _red_bold     = Font(bold=True, color="CC0000")
-            _check_col    = list(label_df.columns).index('주소확인') + 1  # 1-based
-            for _ws in _wb.worksheets:
-                _max_col = _ws.max_column
-                for _r in range(2, _ws.max_row + 1):
-                    _cell = _ws.cell(row=_r, column=_check_col)
-                    if _cell.value and str(_cell.value).strip():
-                        _cell.fill = _yellow
-                        _cell.font = _red_bold
-                        for _c in range(1, _max_col + 1):
-                            if _c != _check_col:
-                                _ws.cell(row=_r, column=_c).fill = _light_yellow
+            highlight_addr_check_sheets(_wb, list(label_df.columns))
             _wb.save(str(out_path))
         except Exception as _e:
             print(f"  (주소확인 강조 실패: {_e})")
 
     print(f"라벨 엑셀 저장: {out_path}")
     print(f"  총 {len(label_df)}건 (취소 {cancel_count}건, 입원 {inpatient_count}건 제외)")
-    print("  [시트별 건수] " + f"{LABEL_SHEET_ALL} {len(label_df)}건 / " +
-          " / ".join(f"{_n} {len(_d)}건" for _n, _d in sheets.items()))
     print("  [한의원별 건수]")
     for clinic, cnt in label_df['한의원_구분'].value_counts().items():
         print(f"    {clinic}: {cnt}건")
@@ -3021,7 +3076,8 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
     highlights = [h for _, h in rows]
     df = pd.DataFrame(data, columns=_CJ_COLUMNS)
     df["_highlight"] = highlights
-    df = sort_cj_upload_df(df)   # 상호 → 보내는분주소 → 품목명 순 정렬
+    # ※ 정렬은 여기서 하지 않는다. 기본 다운로드는 주문 순서 유지(정산 대조용).
+    #    정렬본이 필요하면 '파일 정렬' 버튼으로 별도 복사본을 만든다.
     return df
 
 
@@ -8352,6 +8408,39 @@ def launch_gui():
     last_result_msg = {"text": ""}
     show_result_btn = ttk.Button(btn_frame1, text="결과 다시 보기", state="disabled")
     show_result_btn.pack(side="right", padx=(4, 0))
+
+    # ---------- 파일 정렬 (이미 다운받은 파일 → 정렬된 복사본) ----------
+    def on_sort_files():
+        """택배/라벨 엑셀을 골라 정렬본(_정렬.xlsx)을 만든다. 원본은 그대로 둠."""
+        paths = filedialog.askopenfilenames(
+            title="정렬할 파일 선택 (대한통운 양식 / 탕전 라벨 인쇄용)",
+            filetypes=[("엑셀 파일", "*.xlsx *.xls"), ("모든 파일", "*.*")],
+            initialdir=output_dir_var.get() or os.path.expanduser("~"),
+        )
+        if not paths:
+            return
+        done, failed = [], []
+        for p in paths:
+            try:
+                done.append(make_sorted_copy(p))
+            except Exception as e:
+                failed.append(f"{Path(p).name}\n     → {e}")
+        lines = []
+        if done:
+            lines.append(f"정렬본 {len(done)}개 생성 (원본은 그대로):")
+            lines += [f"  • {Path(d).name}" for d in done]
+        if failed:
+            if lines:
+                lines.append("")
+            lines.append(f"실패 {len(failed)}개:")
+            lines += [f"  • {f}" for f in failed]
+        msg = "\n".join(lines)
+        if done:
+            messagebox.showinfo("파일 정렬", msg)
+        else:
+            messagebox.showerror("파일 정렬", msg)
+
+    ttk.Button(btn_frame1, text="파일 정렬", command=on_sort_files).pack(side="right", padx=(4, 0))
 
     def gui_progress(percent: int, message: str):
         root.after(0, lambda p=percent: progress_var.set(p))
