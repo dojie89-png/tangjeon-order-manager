@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "18.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "18.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2102,6 +2102,7 @@ GORAE_PANAK_CODE_MAP = {
     "위당귀수산(평위산합방)": "WDGSS",
     "위당귀수산 제1가감": "WDGSS1",
     "위당귀수산 제2가감": "WDGSS2",
+    "위당귀수산 제3가감": "WDGSS3",
     "당귀수산": "DGSS",
     "당귀수산 제1가감": "DGSS1",
     "당귀수산 제2가감": "DGSS2",
@@ -2344,12 +2345,21 @@ def export_label_excel(xlsx_path: str):
         if row.get('한의원_구분') != '고래한방_판암':
             return ''
         pres = clean_text(str(row.get('처방명', '') or ''))
-        code = GORAE_PANAK_CODE_MAP.get(pres, '')
+        # 공백 유무 표기 차이 흡수 ("당귀수산제1가감" / "당귀수산 제1가감" 모두 인식)
+        _nospace = {re.sub(r'\s+', '', k): v for k, v in GORAE_PANAK_CODE_MAP.items()}
+
+        def _code_of(name: str) -> str:
+            name = clean_text(name)
+            if not name:
+                return ''
+            return GORAE_PANAK_CODE_MAP.get(name) or _nospace.get(re.sub(r'\s+', '', name), '')
+
+        code = _code_of(pres)
         note = clean_text(str(row.get('처방비고', '') or ''))
         if not code and note:
             # _split_pres 가 처방명의 일부인 괄호까지 잘랐을 경우 재조합해서 재시도
             # 예: "위당귀수산(평위산합방)" → 처방명="위당귀수산", 처방비고="평위산합방" → "위당귀수산(평위산합방)"
-            code = GORAE_PANAK_CODE_MAP.get(f'{pres}({note})', '')
+            code = _code_of(f'{pres}({note})')
         if not code:
             # 지정된 영문코드가 없으면 처방명만 사용 (라벨 공란 방지).
             # 처방비고는 한자·괄호 내용이라 라벨코드에는 넣지 않음.
