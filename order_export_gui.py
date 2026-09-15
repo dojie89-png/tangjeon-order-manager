@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "18.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "18.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2122,6 +2122,87 @@ GORAE_PANAK_CODE_MAP = {
 }
 
 
+# ---------- 라벨 인쇄용 정렬 / 시트 분리 ----------
+# 1번 시트는 주문 순서 그대로 유지(정산 대조용), 아래 시트들이 라벨 출력용 정렬본.
+LABEL_SHEET_ALL  = "전체(주문순)"
+LABEL_SHEET_BULK = "벌크"
+LABEL_SHEET_DIR  = "직송"
+# 필한방 계열 3곳은 라벨 양식·배열이 각각 달라 시트를 따로 뽑는다.
+#   (판정 순서 중요: 성동/청주를 먼저 걸러야 대전필로 오분류되지 않음)
+LABEL_PIL_SHEETS = [
+    ("성동필", lambda s: "성동필" in s),
+    ("청주필", lambda s: "청주필" in s),
+    ("대전필", lambda s: "필한방" in s),
+]
+
+# 라벨 출력 정렬 순서
+LABEL_SORT_KEYS = ['벌크여부', '한의원_구분', '처방명_탕전실용', '파우치용량', '팩수', '환자명']
+# 숫자로 비교해야 하는 열 (문자열 정렬하면 '10' < '9' 가 되어버림)
+LABEL_SORT_NUMERIC = {'파우치용량', '팩수'}
+
+
+def _label_num_key(v) -> int:
+    """'100cc' / '30팩' 처럼 단위가 붙어 있어도 숫자만 뽑아 비교. 숫자 없으면 맨 앞."""
+    m = re.search(r'\d+', str(v or ''))
+    return int(m.group()) if m else -1
+
+
+def sort_label_df(df: pd.DataFrame) -> pd.DataFrame:
+    """라벨 인쇄용 정렬: 벌크여부 → 한의원_구분 → 처방명_탕전실용 → 파우치용량 → 팩수 → 환자명.
+    동순위는 원래 주문 순서 유지(stable)."""
+    keys = [k for k in LABEL_SORT_KEYS if k in df.columns]
+    if not keys or df.empty:
+        return df.copy()
+    tmp = df.copy()
+    for k in keys:
+        if k in LABEL_SORT_NUMERIC:
+            tmp[f'__k_{k}'] = tmp[k].map(_label_num_key)
+        else:
+            # 빈 셀(NaN)이 'nan' 문자열로 섞이지 않게 먼저 채움
+            tmp[f'__k_{k}'] = tmp[k].fillna('').astype(str).map(clean_text)
+    tmp = tmp.sort_values(by=[f'__k_{k}' for k in keys], kind='stable')
+    tmp = tmp.drop(columns=[f'__k_{k}' for k in keys])
+    return tmp.reset_index(drop=True)
+
+
+def split_label_sheets(sorted_df: pd.DataFrame) -> dict:
+    """정렬된 라벨 df를 출력 단위별 시트로 분리.
+    벌크 / 직송(벌크·필한방 제외) / 성동필 / 청주필 / 대전필 — 서로 겹치지 않게 분할한다.
+    건수가 0이어도 시트는 만든다 (헤더만) — 매번 같은 자리에 있어야 헷갈리지 않음."""
+    out: dict = {}
+    empty = sorted_df.iloc[0:0]
+    if sorted_df.empty:
+        return {LABEL_SHEET_BULK: empty, LABEL_SHEET_DIR: empty,
+                **{n: empty for n, _ in LABEL_PIL_SHEETS}}
+
+    bulk_mask = (
+        sorted_df['벌크여부'].fillna('').astype(str).map(clean_text).eq('벌크')
+        if '벌크여부' in sorted_df.columns
+        else pd.Series([False] * len(sorted_df), index=sorted_df.index)
+    )
+    clinic = (
+        sorted_df['한의원_구분'].fillna('').astype(str).map(clean_text)
+        if '한의원_구분' in sorted_df.columns
+        else pd.Series([''] * len(sorted_df), index=sorted_df.index)
+    )
+
+    out[LABEL_SHEET_BULK] = sorted_df[bulk_mask].reset_index(drop=True)
+
+    rest = ~bulk_mask
+    pil_masks = {}
+    taken = pd.Series([False] * len(sorted_df), index=sorted_df.index)
+    for name, matcher in LABEL_PIL_SHEETS:
+        m = rest & ~taken & clinic.map(matcher)
+        pil_masks[name] = m
+        taken |= m
+
+    # 직송 = 벌크도 아니고 필한방 계열도 아닌 환자 직배송 건
+    out[LABEL_SHEET_DIR] = sorted_df[rest & ~taken].reset_index(drop=True)
+    for name, _ in LABEL_PIL_SHEETS:
+        out[name] = sorted_df[pil_masks[name]].reset_index(drop=True)
+    return out
+
+
 def export_label_excel(xlsx_path: str):
     """통합 주문마스터 시트에서 라벨 인쇄용 엑셀 생성 (입원 제외)"""
     try:
@@ -2432,34 +2513,45 @@ def export_label_excel(xlsx_path: str):
     ts_m = re.match(r'^(\d{8}_\d{6})', stem)
     ts_prefix = ts_m.group(1) if ts_m else stem
     out_path = Path(xlsx_path).parent / f"{ts_prefix}_탕전 라벨 인쇄용.xlsx"
-    label_df.to_excel(str(out_path), index=False)
 
-    # '주소확인' 값 있는 행 강조 (노란 배경)
+    # 라벨 출력용 정렬 + 시트 분리
+    sorted_df = sort_label_df(label_df)
+    sheets = split_label_sheets(sorted_df)
+
+    with pd.ExcelWriter(str(out_path), engine="openpyxl") as _writer:
+        # 1번 시트는 기존대로 주문 순서 유지 (정산 시 게시판 순서와 대조용)
+        label_df.to_excel(_writer, sheet_name=LABEL_SHEET_ALL, index=False)
+        for _name, _sdf in sheets.items():
+            _sdf.to_excel(_writer, sheet_name=_name, index=False)
+
+    # '주소확인' 값 있는 행 강조 (노란 배경) — 모든 시트에 동일 적용
     if '주소확인' in label_df.columns:
         try:
             import openpyxl
             from openpyxl.styles import PatternFill, Font
             _wb = openpyxl.load_workbook(str(out_path))
-            _ws = _wb.active
-            _yellow      = PatternFill("solid", fgColor="FFFF00")
+            _yellow       = PatternFill("solid", fgColor="FFFF00")
             _light_yellow = PatternFill("solid", fgColor="FFFFC0")
-            _red_bold    = Font(bold=True, color="CC0000")
-            _max_col     = _ws.max_column
-            _check_col   = list(label_df.columns).index('주소확인') + 1  # 1-based
-            for _r in range(2, _ws.max_row + 1):
-                _cell = _ws.cell(row=_r, column=_check_col)
-                if _cell.value and str(_cell.value).strip():
-                    _cell.fill = _yellow
-                    _cell.font = _red_bold
-                    for _c in range(1, _max_col + 1):
-                        if _c != _check_col:
-                            _ws.cell(row=_r, column=_c).fill = _light_yellow
+            _red_bold     = Font(bold=True, color="CC0000")
+            _check_col    = list(label_df.columns).index('주소확인') + 1  # 1-based
+            for _ws in _wb.worksheets:
+                _max_col = _ws.max_column
+                for _r in range(2, _ws.max_row + 1):
+                    _cell = _ws.cell(row=_r, column=_check_col)
+                    if _cell.value and str(_cell.value).strip():
+                        _cell.fill = _yellow
+                        _cell.font = _red_bold
+                        for _c in range(1, _max_col + 1):
+                            if _c != _check_col:
+                                _ws.cell(row=_r, column=_c).fill = _light_yellow
             _wb.save(str(out_path))
         except Exception as _e:
             print(f"  (주소확인 강조 실패: {_e})")
 
     print(f"라벨 엑셀 저장: {out_path}")
     print(f"  총 {len(label_df)}건 (취소 {cancel_count}건, 입원 {inpatient_count}건 제외)")
+    print("  [시트별 건수] " + f"{LABEL_SHEET_ALL} {len(label_df)}건 / " +
+          " / ".join(f"{_n} {len(_d)}건" for _n, _d in sheets.items()))
     print("  [한의원별 건수]")
     for clinic, cnt in label_df['한의원_구분'].value_counts().items():
         print(f"    {clinic}: {cnt}건")
@@ -2550,6 +2642,28 @@ _CJ_COLUMNS = [
 ]
 
 
+def _is_kejin_tangjeon_sender(name: str) -> bool:
+    """보내는분성명이 '케이진 원외탕전실'인지 (공백/표기 흔들림 허용)"""
+    s = re.sub(r"\s+", "", clean_text(name))
+    return bool(s) and "케이진" in s and "원외탕전실" in s
+
+
+def sort_cj_upload_df(df: pd.DataFrame) -> pd.DataFrame:
+    """CJ 업로드 양식 정렬: 상호 → 보내는분주소 → 품목명.
+    송장 출력 시 같은 병원/같은 보내는 주소끼리 붙어 나오도록.
+    동순위는 원래 주문 순서 유지(stable)."""
+    keys = ["상호", "보내는분주소(전체, 분할)", "품목명"]
+    keys = [k for k in keys if k in df.columns]
+    if not keys or df.empty:
+        return df
+    tmp = df.copy()
+    for k in keys:
+        tmp[f"__k_{k}"] = tmp[k].fillna("").astype(str).map(clean_text)
+    tmp = tmp.sort_values(by=[f"__k_{k}" for k in keys], kind="stable")
+    tmp = tmp.drop(columns=[f"__k_{k}" for k in keys])
+    return tmp.reset_index(drop=True)
+
+
 def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
     """대한통운 파일 업로드 양식 생성 (실제 업로드 양식 기준, A-Q 17컬럼)"""
     # 주문코드 기준 중복 제거 (같은 주문이 두 번 수집된 경우 방지)
@@ -2624,10 +2738,18 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
         if "성동필" in _hosp_c:
             _reship_note = "폭우로 인해 박스가 젖을 경우 금산으로 반송 부탁드립니다."
             _delivery_msg = f"{_delivery_msg} {_reship_note}".strip() if _delivery_msg else _reship_note
+        # 보내는분성명: 상호가 비어 있고 보내는분이 '케이진 원외탕전실'이면 주문자명(회원명)으로 대체.
+        # (송장에 찍히는 보내는 사람이 누구인지 알 수 있게 — 상호가 있는 건은 그대로 둠)
+        _sangho = clean_text(base_row.get("한의원명", ""))
+        _sender_name = clean_text(base_row.get("보내는분", ""))
+        if not _sangho and _is_kejin_tangjeon_sender(_sender_name):
+            _orderer = clean_text(base_row.get("회원명", ""))
+            if _orderer:
+                _sender_name = _orderer
         return [
             format_order_date_only(base_row.get("주문날짜", "")), # A 주문날짜
             ordercode_str,                                       # B 고객주문번호
-            clean_text(base_row.get("한의원명", "")),             # C 상호
+            _sangho,                                             # C 상호
             receiver_name,                                       # D 받는분성명
             receiver_phone,                                      # E 받는분전화번호
             clean_text(base_row.get("받는분_주소", "")),          # F 받는분주소
@@ -2635,7 +2757,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             "신용",                                              # H 운임구분
             2800,                                               # I 기본운임
             1,                                                  # J 박스수량
-            clean_text(base_row.get("보내는분", "")),             # K 보내는분성명
+            _sender_name,                                        # K 보내는분성명
             sender_phone,                                        # L 보내는분전화번호
             clean_text(base_row.get("보내는분_주소", "")),         # M 보내는분주소
             _delivery_msg,                                       # N 배송메세지1
@@ -2899,6 +3021,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
     highlights = [h for _, h in rows]
     df = pd.DataFrame(data, columns=_CJ_COLUMNS)
     df["_highlight"] = highlights
+    df = sort_cj_upload_df(df)   # 상호 → 보내는분주소 → 품목명 순 정렬
     return df
 
 
