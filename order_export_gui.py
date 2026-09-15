@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "19.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "19.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2742,33 +2742,41 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return ""
         return re.sub(r"[^0-9]", "", str(val)).strip()
 
-    _FORCE_DOSAGE_KW = {"약손", "본가"}          # 배송방식 무관, 항상 복용법 첨부
-    _FORCE_DOSAGE_KW_DIRECT = {"판암", "관저"}   # 직배송(환자택배)일 때만 복용법 첨부
+    _FORCE_DOSAGE_KW = {"약손", "본가"}   # 배송방식 무관, 항상 복용법 첨부
+    # 고래한방 지점: 배송 방식으로 갈린다.
+    #   직배송(환자에게 택배)      → 복용법 강제 첨부
+    #   한의원으로 택배            → 복용법 글자 미표기 (벌크든 별도 박스든 동일)
+    _GORAE_DOSAGE_BRANCHES = {"판암", "관저", "오창", "세종"}
 
-    def is_yakson(row) -> bool:
-        """복용법 강제 포함 병원 여부 판정.
-        - 약손·본가: 배송 방식 무관 항상 첨부
-        - 판암점: 한의원으로 택배(벌크)가 아닌 직배송일 때만 첨부"""
+    def dosage_mode(row) -> str:
+        """품목명에 '_복용법'을 붙일지 판정.
+          'force'    : 무조건 붙임 (약손·본가 / 고래 지점 직배송)
+          'suppress' : 무조건 안 붙임 (고래 지점 한의원으로 택배 — 벌크·별도박스 모두)
+          'auto'     : 주문에 복용법 내용(첨부파일/본문)이 있으면 붙임 (기본)"""
         delivery = clean_text(row.get("배송구분", "") or "")
-        for field in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder"]:
-            val = clean_text(str(row.get(field, "") or ""))
-            if any(kw in val for kw in _FORCE_DOSAGE_KW):
-                return True
-            if any(kw in val for kw in _FORCE_DOSAGE_KW_DIRECT):
-                if delivery != "한의원으로 택배":
-                    return True
-        return False
+        haystack = " ".join(
+            clean_text(str(row.get(field, "") or ""))
+            for field in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder"]
+        )
+        if any(kw in haystack for kw in _FORCE_DOSAGE_KW):
+            return "force"
+        # '세종'은 지역명이라 고래 주문에서만 지점 규칙을 적용 (타 병원 오탐 방지)
+        if "고래" in haystack and any(kw in haystack for kw in _GORAE_DOSAGE_BRANCHES):
+            return "suppress" if delivery == "한의원으로 택배" else "force"
+        return "auto"
 
-    def 품명_part(ordercode, patient_name, force_dosage: bool = False) -> str:
+    def 품명_part(ordercode, patient_name, mode: str = "auto") -> str:
         """환자 1명의 품명 파트. 이름 뒤에 '님' 자동 부착.
-        force_dosage=True(약손한의원)이거나,
-        복용첨부파일이 있거나,
-        복용법 본문이 [프린트] 외 실제 내용이 있으면 _복용법 붙임."""
+        mode='force'이거나, 복용첨부파일이 있거나,
+        복용법 본문이 [프린트] 외 실제 내용이 있으면 _복용법 붙임.
+        mode='suppress'면 복용법 내용이 있어도 붙이지 않음."""
+        name_with_honorific = f"{patient_name}님" if clean_text(patient_name) else ""
+        if mode == "suppress":
+            return name_with_honorific
         has_dosage_file = bool(clean_text(dosage_file_map.get(ordercode, "")))
         dosage_text_raw = clean_text(dosage_text_map.get(ordercode, ""))
         has_dosage_text = bool(dosage_text_raw and dosage_text_raw != "[프린트]")
-        name_with_honorific = f"{patient_name}님" if clean_text(patient_name) else ""
-        if force_dosage or has_dosage_file or has_dosage_text:
+        if mode == "force" or has_dosage_file or has_dosage_text:
             return f"{name_with_honorific}_복용법" if name_with_honorific else "복용법"
         return name_with_honorific
 
@@ -3027,7 +3035,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                 품명_part(
                     clean_text(r.get("주문코드", "")),
                     clean_text(r.get("환자명", "") or ""),
-                    force_dosage=is_yakson(r),
+                    mode=dosage_mode(r),
                 )
                 for r in group
             )
@@ -3036,7 +3044,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             continue
 
         bkey = get_bundle_key(row)
-        yakson = is_yakson(row)
+        _mode = dosage_mode(row)
 
         if bkey:
             if bkey in bundle_keys_done:
@@ -3053,7 +3061,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                     품명_part(
                         clean_text(r.get("주문코드", "")),
                         clean_text(r.get("환자명", "") or ""),
-                        force_dosage=is_yakson(r),
+                        mode=dosage_mode(r),
                     )
                     for r in chunk
                 )
@@ -3070,7 +3078,7 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
                 print(f"  [단독/⚠주소확인] {ordercode} / {patient_name} (한의원택배→개인수취인)")
             else:
                 print(f"  [단독] {ordercode} / {patient_name}")
-            rows.append((make_row(row, ordercode, 품명_part(ordercode, patient_name, force_dosage=yakson)), _mismatch))
+            rows.append((make_row(row, ordercode, 품명_part(ordercode, patient_name, mode=_mode)), _mismatch))
 
     data = [r for r, _ in rows]
     highlights = [h for _, h in rows]
