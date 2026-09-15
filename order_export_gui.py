@@ -2147,7 +2147,11 @@ def highlight_addr_check_sheets(wb, columns: list):
 # 정렬본(_정렬.xlsx)에서만 쓴다. 기본 다운로드 파일은 주문 순서를 유지한다.
 LABEL_SHEET_ALL  = "전체(주문순)"
 LABEL_SHEET_BULK = "벌크"
-LABEL_SHEET_DIR  = "직송"
+# 직송은 쓰임새가 둘이라 정렬을 달리한 시트를 각각 만든다.
+#   탕전용  : 탕전 제작 라벨 — 기본 정렬 그대로
+#   라벨지  : 완제품에 붙이는 라벨지 인쇄 — 한의원_구분 → 환자명 만으로 정렬
+LABEL_SHEET_DIR_TANGJEON = "직송(탕전용)"
+LABEL_SHEET_DIR_LABELS   = "직송(라벨지)"
 # 필한방 계열 3곳은 라벨 양식·배열이 각각 달라 시트를 따로 뽑는다.
 #   (판정 순서 중요: 성동/청주를 먼저 걸러야 대전필로 오분류되지 않음)
 LABEL_PIL_SHEETS = [
@@ -2158,6 +2162,8 @@ LABEL_PIL_SHEETS = [
 
 # 라벨 출력 정렬 순서
 LABEL_SORT_KEYS = ['벌크여부', '한의원_구분', '처방명_탕전실용', '파우치용량', '팩수', '환자명']
+# 완제품 라벨지 인쇄용 정렬 (직송 전용)
+LABEL_SORT_KEYS_SIMPLE = ['한의원_구분', '환자명']
 # 숫자로 비교해야 하는 열 (문자열 정렬하면 '10' < '9' 가 되어버림)
 LABEL_SORT_NUMERIC = {'파우치용량', '팩수'}
 
@@ -2192,10 +2198,11 @@ def _label_num_key(v) -> int:
     return int(m.group()) if m else -1
 
 
-def sort_label_df(df: pd.DataFrame) -> pd.DataFrame:
-    """라벨 인쇄용 정렬: 벌크여부 → 한의원_구분 → 처방명_탕전실용 → 파우치용량 → 팩수 → 환자명.
-    동순위는 원래 주문 순서 유지(stable)."""
-    keys = [k for k in LABEL_SORT_KEYS if k in df.columns]
+def sort_label_df(df: pd.DataFrame, sort_keys: list = None) -> pd.DataFrame:
+    """라벨 인쇄용 정렬. 기본: 벌크여부 → 한의원_구분 → 처방명_탕전실용 → 파우치용량 → 팩수 → 환자명.
+    sort_keys로 다른 기준을 줄 수 있다 (완제품 라벨지용 = 한의원_구분 → 환자명).
+    동순위는 넘어온 순서 유지(stable)."""
+    keys = [k for k in (sort_keys or LABEL_SORT_KEYS) if k in df.columns]
     if not keys or df.empty:
         return df.copy()
     tmp = df.copy()
@@ -2217,7 +2224,8 @@ def split_label_sheets(sorted_df: pd.DataFrame) -> dict:
     out: dict = {}
     empty = sorted_df.iloc[0:0]
     if sorted_df.empty:
-        return {LABEL_SHEET_BULK: empty, LABEL_SHEET_DIR: empty,
+        return {LABEL_SHEET_BULK: empty,
+                LABEL_SHEET_DIR_TANGJEON: empty, LABEL_SHEET_DIR_LABELS: empty,
                 **{n: empty for n, _ in LABEL_PIL_SHEETS}}
 
     bulk_mask = (
@@ -2241,8 +2249,11 @@ def split_label_sheets(sorted_df: pd.DataFrame) -> dict:
         pil_masks[name] = m
         taken |= m
 
-    # 직송 = 벌크도 아니고 필한방 계열도 아닌 환자 직배송 건
-    out[LABEL_SHEET_DIR] = sorted_df[rest & ~taken].reset_index(drop=True)
+    # 직송 = 벌크도 아니고 필한방 계열도 아닌 환자 직배송 건.
+    #   같은 행을 쓰임새에 맞춰 두 가지 순서로 낸다.
+    direct = sorted_df[rest & ~taken].reset_index(drop=True)
+    out[LABEL_SHEET_DIR_TANGJEON] = direct
+    out[LABEL_SHEET_DIR_LABELS] = sort_label_df(direct, LABEL_SORT_KEYS_SIMPLE)
     for name, _ in LABEL_PIL_SHEETS:
         out[name] = sorted_df[pil_masks[name]].reset_index(drop=True)
     return out
