@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "19.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "19.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2745,14 +2745,14 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
     _FORCE_DOSAGE_KW = {"약손", "본가"}   # 배송방식 무관, 항상 복용법 첨부
     # 고래한방 지점: 배송 방식으로 갈린다.
     #   직배송(환자에게 택배)      → 복용법 강제 첨부
-    #   한의원으로 택배            → 복용법 글자 미표기 (벌크든 별도 박스든 동일)
+    #   한의원으로 택배            → 복용첨부파일이 있을 때만 첨부 (본문만 있으면 미표기)
     _GORAE_DOSAGE_BRANCHES = {"판암", "관저", "오창", "세종"}
 
     def dosage_mode(row) -> str:
         """품목명에 '_복용법'을 붙일지 판정.
-          'force'    : 무조건 붙임 (약손·본가 / 고래 지점 직배송)
-          'suppress' : 무조건 안 붙임 (고래 지점 한의원으로 택배 — 벌크·별도박스 모두)
-          'auto'     : 주문에 복용법 내용(첨부파일/본문)이 있으면 붙임 (기본)"""
+          'force'     : 무조건 붙임 (약손·본가 / 고래 지점 직배송)
+          'file_only' : 복용첨부파일이 있을 때만 붙임 (고래 지점 한의원으로 택배)
+          'auto'      : 복용첨부파일 또는 복용법 본문이 있으면 붙임 (기본)"""
         delivery = clean_text(row.get("배송구분", "") or "")
         haystack = " ".join(
             clean_text(str(row.get(field, "") or ""))
@@ -2762,21 +2762,30 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             return "force"
         # '세종'은 지역명이라 고래 주문에서만 지점 규칙을 적용 (타 병원 오탐 방지)
         if "고래" in haystack and any(kw in haystack for kw in _GORAE_DOSAGE_BRANCHES):
-            return "suppress" if delivery == "한의원으로 택배" else "force"
+            if delivery != "한의원으로 택배":
+                return "force"
+            # 한의원택배로 찍혀 있지만 받는분이 개인 → 배송구분 입력 실수. 실제로는 직배송.
+            if is_delivery_address_mismatch(delivery, clean_text(row.get("받는분", "") or "")):
+                return "force"
+            return "file_only"
         return "auto"
 
     def 품명_part(ordercode, patient_name, mode: str = "auto") -> str:
         """환자 1명의 품명 파트. 이름 뒤에 '님' 자동 부착.
-        mode='force'이거나, 복용첨부파일이 있거나,
-        복용법 본문이 [프린트] 외 실제 내용이 있으면 _복용법 붙임.
-        mode='suppress'면 복용법 내용이 있어도 붙이지 않음."""
+        mode='force'     → 항상 _복용법
+        mode='file_only' → 복용첨부파일이 있을 때만 (복용법 본문만 있으면 미표기)
+        mode='auto'      → 복용첨부파일 또는 복용법 본문([프린트] 제외)이 있으면"""
         name_with_honorific = f"{patient_name}님" if clean_text(patient_name) else ""
-        if mode == "suppress":
-            return name_with_honorific
         has_dosage_file = bool(clean_text(dosage_file_map.get(ordercode, "")))
         dosage_text_raw = clean_text(dosage_text_map.get(ordercode, ""))
         has_dosage_text = bool(dosage_text_raw and dosage_text_raw != "[프린트]")
-        if mode == "force" or has_dosage_file or has_dosage_text:
+        if mode == "force":
+            attach = True
+        elif mode == "file_only":
+            attach = has_dosage_file
+        else:
+            attach = has_dosage_file or has_dosage_text
+        if attach:
             return f"{name_with_honorific}_복용법" if name_with_honorific else "복용법"
         return name_with_honorific
 
