@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "19.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "19.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -8098,7 +8098,7 @@ def run_shop_order_job(settings: dict, progress_callback=None, log_callback=None
 def launch_gui():
     root = tk.Tk()
     root.title(f"케이진 탕전주문 관리 v{APP_VERSION}")
-    root.geometry("540x884")      # 라벨 메이커 툴바 추가분 반영 (하단 실행 버튼 잘림 방지)
+    root.geometry("560x940")      # 라벨 메이커 툴바 + 인쇄용 정렬본 줄 반영 (하단 잘림 방지)
     root.resizable(False, True)   # 세로 리사이즈 허용 (맥에서 하단 잘림 대응)
 
     # 메인스레드 콜백(root.after 등) 예외가 Tk 이벤트루프를 죽이지 않도록 안전 처리.
@@ -8593,13 +8593,16 @@ def launch_gui():
     close_button = ttk.Button(btn_frame1, text="종료", command=root.destroy)
     close_button.pack(side="left", padx=(0, 4))
 
-    # 오른쪽 정렬: 출력 폴더 열기(맨 오른쪽) + 결과 다시 보기(그 왼쪽)
-    open_folder_btn = ttk.Button(btn_frame1, text="출력 폴더 열기", state="disabled")
+    # 실행 줄에는 실행/취소/종료만 둔다. 나머지 버튼은 아래 보조 도구 줄로 분리 —
+    # 한 줄에 6개를 밀어 넣으니 '결과 다시 보기'가 '결'로 잘렸다.
+    sort_row = ttk.Frame(tab1)
+    sort_row.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+
+    open_folder_btn = ttk.Button(sort_row, text="출력 폴더 열기", state="disabled")
     open_folder_btn.pack(side="right", padx=(4, 0))
 
-    # 마지막 작업 결과 요약 저장 (다시 보기용)
-    last_result_msg = {"text": ""}
-    show_result_btn = ttk.Button(btn_frame1, text="결과 다시 보기", state="disabled")
+    last_result_msg = {"text": ""}   # 마지막 작업 결과 요약 (다시 보기용)
+    show_result_btn = ttk.Button(sort_row, text="결과 다시 보기", state="disabled")
     show_result_btn.pack(side="right", padx=(4, 0))
 
     # ---------- 파일 정렬 (이미 다운받은 파일 → 정렬된 복사본) ----------
@@ -8629,11 +8632,12 @@ def launch_gui():
             lines += [f"  • {f}" for f in failed]
         msg = "\n".join(lines)
         if done:
-            messagebox.showinfo("파일 정렬", msg)
+            messagebox.showinfo("인쇄용 정렬본", msg)
         else:
-            messagebox.showerror("파일 정렬", msg)
+            messagebox.showerror("인쇄용 정렬본", msg)
 
-    ttk.Button(btn_frame1, text="파일 정렬", command=on_sort_files).pack(side="right", padx=(4, 0))
+    ttk.Button(sort_row, text="인쇄용 정렬본 만들기",
+               command=on_sort_files).pack(side="left")
 
     def gui_progress(percent: int, message: str):
         root.after(0, lambda p=percent: progress_var.set(p))
