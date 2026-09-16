@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "19.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "19.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2084,7 +2084,9 @@ def lookup_tangjeon_room_name(clinic: str, pres_name: str, pres_note: str = "") 
     trimmed = base
     # TA 를 먼저 떼야 그 앞의 '가감'까지 단계적으로 벗겨진다.
     #   예) 당귀지통탕가감TA → 당귀지통탕가감 → 당귀지통탕
-    for pat in (r"\s*[Tt][Aa]\s*$", r"제\s*\d+\s*가감\s*$", r"가감방\d*\s*$", r"가감\s*$", r"가미\s*$"):
+    #   '가감탕'(예: 귀비온담탕 가감탕)도 '가감방'과 같은 가감 표기라 함께 제거한다.
+    for pat in (r"\s*[Tt][Aa]\s*$", r"제\s*\d+\s*가감\s*$",
+                r"가감[방탕]\d*\s*$", r"가감\s*$", r"가미\s*$"):
         new = re.sub(pat, "", trimmed).strip()
         if new and new != trimmed:
             trimmed = new
@@ -2168,7 +2170,10 @@ LABEL_SORT_KEYS_SIMPLE = ['한의원_구분', '환자명']
 LABEL_SORT_NUMERIC = {'파우치용량', '팩수'}
 
 
-BULK_SUMMARY_SHEET = "벌크 요약"
+BULK_SUMMARY_SHEET   = "벌크 요약"
+DIRECT_SUMMARY_SHEET = "직송 요약"
+# 탕전실용 처방명(단가표)이 있는 곳만 요약 대상 — 고래 4지점 + 필 3곳
+GORAE_CLINIC_PREFIX  = "고래한방"
 # 120ml·110ml은 실제로 같은 용량으로 나가므로 집계에서는 110ml로 합친다.
 POUCH_MERGE_FROM = "120ml"
 POUCH_MERGE_TO   = "110ml"
@@ -2275,46 +2280,54 @@ def add_merged_volume_col(bulk_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _summary_title(bulk_df: pd.DataFrame) -> str:
-    """'260915 고래 벌크' — 탕전일자(가장 많은 값) 기준 YYMMDD"""
-    ymd = ''
-    if '탕전일자' in bulk_df.columns:
-        vals = [clean_text(str(v or '')) for v in bulk_df['탕전일자'] if clean_text(str(v or ''))]
-        if vals:
-            m = re.search(r'(\d{4})\D?(\d{2})\D?(\d{2})', max(set(vals), key=vals.count))
-            if m:
-                ymd = f"{m.group(1)[2:]}{m.group(2)}{m.group(3)}"
-    return f"{ymd} 고래 벌크".strip()
+def _summary_ymd(df: pd.DataFrame) -> str:
+    """탕전일자(가장 많은 값) 기준 YYMMDD. 없으면 빈 문자열."""
+    if '탕전일자' not in df.columns:
+        return ''
+    vals = [clean_text(str(v or '')) for v in df['탕전일자'] if clean_text(str(v or ''))]
+    if not vals:
+        return ''
+    m = re.search(r'(\d{4})\D?(\d{2})\D?(\d{2})', max(set(vals), key=vals.count))
+    return f"{m.group(1)[2:]}{m.group(2)}{m.group(3)}" if m else ''
 
 
-def build_bulk_summary_sheet(wb, bulk_df: pd.DataFrame, bulk_sheet_name: str = LABEL_SHEET_BULK):
-    """'벌크 요약' 시트 생성 — 처방명_탕전실용 × 통합용량 × 팩수 별 지점 건수 표.
-    건수는 COUNTIFS 수식이라 벌크 시트를 손으로 고쳐도 자동으로 다시 계산된다."""
+def build_count_summary_sheet(wb, sheet_name: str, title: str, col_specs: list,
+                              after_sheet: str = None):
+    """건수 요약 시트 생성 — 처방명_탕전실용 × 통합용량 × 팩수 별 한의원 건수 표.
+
+    col_specs: [{'label': 한의원_구분 값, 'sheet': 세어올 시트명, 'df': 그 시트 df}, ...]
+      열마다 참조 시트가 달라도 된다 (직송 요약은 고래=직송 시트, 필은 각자 시트).
+    건수는 COUNTIFS 수식이라 원본 시트를 손으로 고쳐도 자동으로 다시 계산된다."""
     from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
     from openpyxl.utils import get_column_letter
-    if bulk_df.empty:
-        return None
+
     need = ['한의원_구분', '처방명_탕전실용', '팩수', '파우치용량', MERGED_VOLUME_COL]
-    missing = [c for c in need if c not in bulk_df.columns]
-    if missing:
-        raise ValueError(f"벌크 요약에 필요한 열이 없어요: {', '.join(missing)}")
+    specs = []
+    for sp in col_specs:
+        df = sp['df']
+        if df is None or df.empty:
+            continue
+        missing = [c for c in need if c not in df.columns]
+        if missing:
+            raise ValueError(f"{sheet_name}에 필요한 열이 없어요: {', '.join(missing)}")
+        rows = df[df['한의원_구분'].fillna('').astype(str).map(clean_text) == sp['label']]
+        if rows.empty:
+            continue
+        specs.append({**sp, 'rows': rows})
+    if not specs:
+        return None
 
-    cols = list(bulk_df.columns)
-    def _L(name):
-        return get_column_letter(cols.index(name) + 1)
-    c_clinic, c_pres, c_packs, c_vol = (
-        _L('한의원_구분'), _L('처방명_탕전실용'), _L('팩수'), _L(MERGED_VOLUME_COL))
+    # 행 키(처방명·용량·팩수)는 포함된 한의원들의 행에서만 뽑는다
+    keyset = set()
+    for sp in specs:
+        rows = sp['rows']
+        keyset |= set(zip(
+            rows['처방명_탕전실용'].fillna('').astype(str).map(clean_text),
+            rows['파우치용량'].map(merge_pouch_volume),
+            rows['팩수'].map(_label_num_key)))
+    keys = sorted(keyset, key=lambda k: (k[0], _label_num_key(k[1]), k[2]))
 
-    pres   = bulk_df['처방명_탕전실용'].fillna('').astype(str).map(clean_text)
-    vol    = bulk_df['파우치용량'].map(merge_pouch_volume)
-    packs  = bulk_df['팩수'].map(_label_num_key)
-    clinic = bulk_df['한의원_구분'].fillna('').astype(str).map(clean_text)
-
-    branches = sorted(set(c for c in clinic if c))
-    keys = sorted(set(zip(pres, vol, packs)),
-                  key=lambda k: (k[0], _label_num_key(k[1]), k[2]))
-
-    ws = wb.create_sheet(BULK_SUMMARY_SHEET)
+    ws = wb.create_sheet(sheet_name)
     thin   = Side(style="thin")
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
     center = Alignment(horizontal="center", vertical="center")
@@ -2322,16 +2335,22 @@ def build_bulk_summary_sheet(wb, bulk_df: pd.DataFrame, bulk_sheet_name: str = L
     gray  = PatternFill("solid", fgColor=SUMMARY_GRAY)
     green = PatternFill("solid", fgColor=SUMMARY_GREEN)
 
-    ws["B2"] = _summary_title(bulk_df)
+    ws["B2"] = title
     ws["B2"].font = Font(name=SUMMARY_FONT, size=9, bold=True)
 
     HDR_ROW = 4
-    headers = ['처방명_탕전실용', '용량', '팩수'] + branches + ['합계']
+    headers = ['처방명_탕전실용', '용량', '팩수'] + [sp['label'] for sp in specs] + ['합계']
     for i, h in enumerate(headers):
         cell = ws.cell(row=HDR_ROW, column=2 + i, value=h)
         cell.font, cell.alignment, cell.border, cell.fill = base_font, center, border, gray
 
+    def _letters(df):
+        cols = list(df.columns)
+        return tuple(get_column_letter(cols.index(n) + 1)
+                     for n in ('한의원_구분', '처방명_탕전실용', '팩수', MERGED_VOLUME_COL))
+
     first_data = HDR_ROW + 1
+    tot_col = 5 + len(specs)
     for ri, (p, v, pk) in enumerate(keys):
         r = first_data + ri
         for col, val, fill in (
@@ -2341,16 +2360,17 @@ def build_bulk_summary_sheet(wb, bulk_df: pd.DataFrame, bulk_sheet_name: str = L
         ):
             cell = ws.cell(row=r, column=col, value=val)
             cell.font, cell.alignment, cell.border, cell.fill = base_font, center, border, fill
-        for bi in range(len(branches)):
+        for bi, sp in enumerate(specs):
             col = 5 + bi
             bl = get_column_letter(col)
+            src = sp['sheet']
+            c_clinic, c_pres, c_packs, c_vol = _letters(sp['df'])
             cell = ws.cell(row=r, column=col, value=(
-                f"=COUNTIFS('{bulk_sheet_name}'!${c_clinic}:${c_clinic},{bl}${HDR_ROW},"
-                f"'{bulk_sheet_name}'!${c_pres}:${c_pres},$B{r},"
-                f"'{bulk_sheet_name}'!${c_packs}:${c_packs},$D{r},"
-                f"'{bulk_sheet_name}'!${c_vol}:${c_vol},$C{r})"))
+                f"=COUNTIFS('{src}'!${c_clinic}:${c_clinic},{bl}${HDR_ROW},"
+                f"'{src}'!${c_pres}:${c_pres},$B{r},"
+                f"'{src}'!${c_packs}:${c_packs},$D{r},"
+                f"'{src}'!${c_vol}:${c_vol},$C{r})"))
             cell.font, cell.alignment, cell.border = base_font, center, border
-        tot_col = 5 + len(branches)
         cell = ws.cell(row=r, column=tot_col, value=(
             f"=SUM({get_column_letter(5)}{r}:{get_column_letter(tot_col - 1)}{r})"))
         cell.font, cell.alignment, cell.border = base_font, center, border
@@ -2363,7 +2383,6 @@ def build_bulk_summary_sheet(wb, bulk_df: pd.DataFrame, bulk_sheet_name: str = L
         c2 = ws.cell(row=sum_row, column=col)
         c2.border, c2.fill = border, gray
     ws.merge_cells(start_row=sum_row, start_column=2, end_row=sum_row, end_column=4)
-    tot_col = 5 + len(branches)
     for col in range(5, tot_col + 1):
         bl = get_column_letter(col)
         cell = ws.cell(row=sum_row, column=col, value=(
@@ -2379,14 +2398,48 @@ def build_bulk_summary_sheet(wb, bulk_df: pd.DataFrame, bulk_sheet_name: str = L
     for r in range(2, sum_row + 1):
         ws.row_dimensions[r].height = 15.0
 
-    # 벌크 시트 바로 뒤로 이동
-    try:
-        order = wb.sheetnames
-        wb.move_sheet(BULK_SUMMARY_SHEET,
-                      offset=(order.index(bulk_sheet_name) + 1) - order.index(BULK_SUMMARY_SHEET))
-    except Exception:
-        pass
+    if after_sheet:
+        try:
+            order = wb.sheetnames
+            wb.move_sheet(sheet_name,
+                          offset=(order.index(after_sheet) + 1) - order.index(sheet_name))
+        except Exception:
+            pass
     return ws
+
+
+def build_bulk_summary_sheet(wb, bulk_df: pd.DataFrame,
+                             bulk_sheet_name: str = LABEL_SHEET_BULK):
+    """'벌크 요약' — 벌크 시트에 들어 있는 모든 지점을 열로."""
+    if bulk_df is None or bulk_df.empty:
+        return None
+    clinics = sorted({c for c in bulk_df['한의원_구분'].fillna('').astype(str).map(clean_text) if c})
+    specs = [{'label': c, 'sheet': bulk_sheet_name, 'df': bulk_df} for c in clinics]
+    return build_count_summary_sheet(
+        wb, BULK_SUMMARY_SHEET, f"{_summary_ymd(bulk_df)} 고래 벌크".strip(),
+        specs, after_sheet=bulk_sheet_name)
+
+
+def build_direct_summary_sheet(wb, sheets: dict, after_sheet: str = None):
+    """'직송 요약' — 탕전실용 처방명이 따로 있는 고래 4지점 + 필 3곳만 열로 만든다.
+    고래는 직송 시트에서, 필 3곳은 각자 시트에서 센다 (시트가 나뉘어 있기 때문)."""
+    specs = []
+    direct = sheets.get(LABEL_SHEET_DIR_TANGJEON)
+    if direct is not None and not direct.empty:
+        clinics = sorted({c for c in direct['한의원_구분'].fillna('').astype(str).map(clean_text)
+                          if c.startswith(GORAE_CLINIC_PREFIX)})
+        specs += [{'label': c, 'sheet': LABEL_SHEET_DIR_TANGJEON, 'df': direct} for c in clinics]
+    for name, _ in LABEL_PIL_SHEETS:
+        pil = sheets.get(name)
+        if pil is None or pil.empty:
+            continue
+        clinics = sorted({c for c in pil['한의원_구분'].fillna('').astype(str).map(clean_text) if c})
+        specs += [{'label': c, 'sheet': name, 'df': pil} for c in clinics]
+    if not specs:
+        return None
+    ymd = _summary_ymd(direct if direct is not None and not direct.empty else specs[0]['df'])
+    return build_count_summary_sheet(
+        wb, DIRECT_SUMMARY_SHEET, f"{ymd} 고래·필 직송".strip(), specs, after_sheet=after_sheet)
 
 
 def detect_sortable_kind(df: pd.DataFrame) -> str:
@@ -2431,7 +2484,9 @@ def make_sorted_copy(src_path: str, log=print) -> str:
             df.loc[_n.isna(), '팩수'] = ''
         sorted_df = sort_label_df(df)
         sheets = split_label_sheets(sorted_df)
-        sheets[LABEL_SHEET_BULK] = add_merged_volume_col(sheets[LABEL_SHEET_BULK])
+        # 요약표가 세는 시트에는 통합용량(120ml→110ml) 열이 있어야 한다
+        for _name in sheets:
+            sheets[_name] = add_merged_volume_col(sheets[_name])
         with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
             # 1번 시트는 원본(주문순) 그대로 — 정산 시 게시판 순서와 대조용
             df.to_excel(writer, sheet_name=LABEL_SHEET_ALL, index=False)
@@ -2446,6 +2501,12 @@ def make_sorted_copy(src_path: str, log=print) -> str:
                     log("[정렬] 벌크 건이 없어 '벌크 요약' 시트는 만들지 않음")
             except Exception as e:
                 log(f"[정렬] 벌크 요약 생성 실패: {e}")
+            try:
+                if build_direct_summary_sheet(
+                        wb, sheets, after_sheet=LABEL_SHEET_DIR_LABELS) is None:
+                    log("[정렬] 고래·필 직송 건이 없어 '직송 요약' 시트는 만들지 않음")
+            except Exception as e:
+                log(f"[정렬] 직송 요약 생성 실패: {e}")
             wb.save(str(out_path))
         except Exception as e:
             log(f"[정렬] 후처리 실패: {e}")
