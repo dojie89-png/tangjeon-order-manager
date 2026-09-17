@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "19.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "19.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2442,6 +2442,74 @@ def build_direct_summary_sheet(wb, sheets: dict, after_sheet: str = None):
         wb, DIRECT_SUMMARY_SHEET, f"{ymd} 고래·필 직송".strip(), specs, after_sheet=after_sheet)
 
 
+# 정렬 중 원본 행 번호를 들고 다니는 임시 열 (저장 직전에 제거)
+_SRC_ROW_COL = "__원본행"
+
+
+def _snap_cell_style(cell) -> dict:
+    """셀 서식을 '객체'로 떠온다.
+    cell._style 은 그 워크북의 스타일 테이블 인덱스라서 다른 파일에 넣으면 깨진다."""
+    from copy import copy as _copy
+    return {
+        'fill': _copy(cell.fill),
+        'font': _copy(cell.font),
+        'border': _copy(cell.border),
+        'alignment': _copy(cell.alignment),
+        'number_format': cell.number_format,
+    }
+
+
+def capture_sheet_styles(path: str, sheet_index: int = 0) -> dict:
+    """원본 시트 서식을 떠온다 — 정렬해도 색·글꼴이 그 행을 따라가게.
+    채우기가 있는 행만 뜬다(= 묶음·합포·주소확인 표시). 나머지는 기본 서식 그대로 둔다.
+    반환: {'header': [...], 'rows': {0-based 데이터행: [...]}, 'widths': {열문자: 너비}}"""
+    import openpyxl
+    wb = openpyxl.load_workbook(path)
+    ws = wb.worksheets[sheet_index]
+    ncol = ws.max_column
+    out = {
+        'header': [_snap_cell_style(ws.cell(row=1, column=c)) for c in range(1, ncol + 1)],
+        'rows': {},
+        'widths': {l: d.width for l, d in ws.column_dimensions.items() if d.width},
+    }
+    for r in range(2, ws.max_row + 1):
+        cells = [ws.cell(row=r, column=c) for c in range(1, ncol + 1)]
+        if any(c.fill is not None and c.fill.patternType for c in cells):
+            out['rows'][r - 2] = [_snap_cell_style(c) for c in cells]
+    return out
+
+
+def apply_sheet_styles(path: str, sheet_name, styles: dict, src_rows: list) -> int:
+    """capture_sheet_styles 로 떠온 서식을 정렬된 시트에 다시 입힌다.
+    src_rows[i] = 새 i번째 데이터행이 원본에서 몇 번째였는지. 반환: 복원한 행 수."""
+    import openpyxl
+
+    def _put(cell, st):
+        cell.fill = st['fill']
+        cell.font = st['font']
+        cell.border = st['border']
+        cell.alignment = st['alignment']
+        cell.number_format = st['number_format']
+
+    wb = openpyxl.load_workbook(path)
+    ws = wb[sheet_name] if sheet_name else wb.active
+    ncol = ws.max_column
+    for ci, st in enumerate(styles.get('header', [])[:ncol], start=1):
+        _put(ws.cell(row=1, column=ci), st)
+    restored = 0
+    for i, src in enumerate(src_rows):
+        row_styles = styles.get('rows', {}).get(src)
+        if not row_styles:
+            continue
+        for ci, st in enumerate(row_styles[:ncol], start=1):
+            _put(ws.cell(row=i + 2, column=ci), st)
+        restored += 1
+    for letter, width in styles.get('widths', {}).items():
+        ws.column_dimensions[letter].width = width
+    wb.save(path)
+    return restored
+
+
 def detect_sortable_kind(df: pd.DataFrame) -> str:
     """업로드된 엑셀이 어떤 파일인지 판별 → 'cj' / 'label' / ''(알 수 없음)"""
     cols = set(str(c).strip() for c in df.columns)
@@ -2473,9 +2541,21 @@ def make_sorted_copy(src_path: str, log=print) -> str:
     out_path = src.parent / f"{src.stem}_정렬.xlsx"
 
     if kind == 'cj':
+        # 원본 서식(묶음·합포 노란 채우기 등)을 행을 따라 옮긴다.
+        # pandas 는 값만 읽으므로 그냥 다시 쓰면 색이 통째로 사라진다.
+        styles = capture_sheet_styles(str(src))
+        df[_SRC_ROW_COL] = range(len(df))
         sorted_df = sort_cj_upload_df(df)
+        src_rows = sorted_df[_SRC_ROW_COL].tolist()
+        sorted_df = sorted_df.drop(columns=[_SRC_ROW_COL])
         sorted_df.to_excel(str(out_path), index=False)
-        log(f"[정렬] 택배 파일 {len(sorted_df)}행 — 상호 → 보내는분주소 → 품목명")
+        restored = 0
+        try:
+            restored = apply_sheet_styles(str(out_path), None, styles, src_rows)
+        except Exception as e:
+            log(f"[정렬] 원본 서식 복원 실패: {e}")
+        log(f"[정렬] 택배 파일 {len(sorted_df)}행 — 상호 → 보내는분주소 → 품목명"
+            f" (색칠 {restored}행 유지)")
     else:
         # 팩수는 숫자로 — COUNTIFS 집계·엑셀 정렬이 텍스트('10'<'9')로 어긋나지 않게
         if '팩수' in df.columns:
