@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "19.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "19.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2511,21 +2511,57 @@ def apply_sheet_styles(path: str, sheet_name, styles: dict, src_rows: list) -> i
 
 
 def detect_sortable_kind(df: pd.DataFrame) -> str:
-    """업로드된 엑셀이 어떤 파일인지 판별 → 'cj' / 'label' / ''(알 수 없음)"""
+    """업로드된 엑셀이 어떤 파일인지 판별 → 'cj' / 'label' / 'master' / ''(알 수 없음)"""
     cols = set(str(c).strip() for c in df.columns)
     if {'상호', '보내는분성명', '품목명'} <= cols:
         return 'cj'
     if {'한의원_구분', '환자명'} <= cols and ('처방명_탕전실용' in cols or '벌크여부' in cols):
         return 'label'
+    if {'주문코드', '회원명', '한의원명', '조제지시사항', '진행상태'} <= cols:
+        return 'master'
     return ''
 
 
+def clean_master_copy(src_path: str, out_path: str, log=print) -> int:
+    """탕전주문 마스터에서 미발송(입원·원내분출) 행을 지우고 no. 를 1부터 다시 매긴다.
+    지우는 기준은 라벨 파일의 미발송 제외와 동일:
+      입원     → 고래 관저·판암 (오창·세종은 입원이어도 발송하므로 남김)
+      원내분출 → 고래 세종
+    openpyxl 로 행만 지워서 원본 서식(헤더 테두리 등)은 그대로 둔다. 반환: 지운 행 수."""
+    import openpyxl
+    df = pd.read_excel(src_path, sheet_name=0, dtype=str)
+    clinic = classify_clinic_series(df)
+    excl = hold_exclusion_mask(df, clinic)
+    drop_rows = [i for i, v in enumerate(excl.tolist()) if v]
+
+    for i in drop_rows:
+        _c = clean_text(str(clinic.iloc[i]))
+        _n = clean_text(str(df.iloc[i].get('환자명', '') or ''))
+        _note = clean_text(str(df.iloc[i].get('조제지시사항', '') or ''))
+        log(f"  [삭제] {_c} / {_n} / {_note[:30]}")
+
+    wb = openpyxl.load_workbook(src_path)
+    ws = wb.worksheets[0]
+    for i in sorted(drop_rows, reverse=True):   # 뒤에서부터 지워야 행번호가 안 밀린다
+        ws.delete_rows(i + 2)                   # +2 = 헤더 1행 + 0-based 보정
+
+    if clean_text(str(ws.cell(row=1, column=1).value or '')).lower().rstrip('.') == 'no':
+        for r in range(2, ws.max_row + 1):
+            ws.cell(row=r, column=1, value=r - 1)   # 남은 순서대로 1,2,3...
+    else:
+        log("  (A열이 'no.' 가 아니라 번호는 다시 매기지 않음)")
+
+    wb.save(out_path)
+    return len(drop_rows)
+
+
 def make_sorted_copy(src_path: str, log=print) -> str:
-    """다운로드한 택배/라벨 파일을 읽어 정렬한 '복사본'을 만든다.
+    """다운로드한 택배/라벨/마스터 파일을 정리한 '복사본'을 만든다.
     원본은 손대지 않고 '{원본이름}_정렬.xlsx' 로 옆에 저장.
-      - 택배(CJ) : 상호 → 보내는분주소 → 품목명 순 정렬 (시트 1개)
+      - 택배(CJ) : 상호 → 보내는분주소 → 품목명 순 정렬 (원본 서식 유지)
       - 라벨     : 벌크여부 → 한의원_구분 → 처방명_탕전실용 → 파우치용량 → 팩수 → 환자명 순
-                   정렬 후 전체(주문순)/벌크/직송/성동필/청주필/대전필 시트로 분리
+                   정렬 후 전체(주문순)/벌크/직송/필 시트로 분리 + 벌크·직송 요약
+      - 마스터   : 미발송(입원·원내분출) 행 삭제 후 no. 재부여
     반환: 저장한 파일 경로"""
     src = Path(src_path)
     if not src.exists():
@@ -2535,12 +2571,15 @@ def make_sorted_copy(src_path: str, log=print) -> str:
     kind = detect_sortable_kind(df)
     if not kind:
         raise ValueError(
-            "택배(대한통운) 파일도, 탕전 라벨 인쇄용 파일도 아닌 것 같아요.\n"
+            "택배(대한통운)·탕전 라벨 인쇄용·탕전주문 마스터 중 어느 것도 아닌 것 같아요.\n"
             f"첫 시트 열: {', '.join(str(c) for c in list(df.columns)[:10])} ...")
 
     out_path = src.parent / f"{src.stem}_정렬.xlsx"
 
-    if kind == 'cj':
+    if kind == 'master':
+        removed = clean_master_copy(str(src), str(out_path), log)
+        log(f"[정렬] 마스터 파일 — 미발송(입원·원내분출) {removed}행 삭제, no. 재부여")
+    elif kind == 'cj':
         # 원본 서식(묶음·합포 노란 채우기 등)을 행을 따라 옮긴다.
         # pandas 는 값만 읽으므로 그냥 다시 쓰면 색이 통째로 사라진다.
         styles = capture_sheet_styles(str(src))
@@ -2597,6 +2636,62 @@ def make_sorted_copy(src_path: str, log=print) -> str:
     return str(out_path)
 
 
+def classify_clinic_series(df: pd.DataFrame) -> pd.Series:
+    """주문마스터 df → 한의원_구분 열 (고래는 지점까지 판별).
+    ★ 보내는분(병원)만 사용. 받는분(환자 집) 주소는 지점 판별에서 제외.
+      (환자 집이 예: 관저동이면 판암점 주문도 관저로 오분류되던 버그 방지)"""
+    addr_map = {}
+    if '주문코드' in df.columns:
+        for _, r in df.iterrows():
+            code = clean_text(str(r.get('주문코드', '') or ''))
+            if code:
+                parts = [clean_text(str(r.get(c, '') or ''))
+                         for c in ['보내는분', '보내는분_주소']]
+                addr_map[code] = ' '.join(p for p in parts if p)
+
+    def _one(row):
+        clinic = clean_text(str(row.get('한의원명', '') or ''))
+        if '고래' in clinic:
+            # 1순위: 회원명(지점 전담 주문자) 매핑이 가장 신뢰도 높음
+            member = clean_text(str(row.get('회원명', '') or ''))
+            if member in GORAE_MEMBER_BRANCH_MAP:
+                return f"고래한방_{GORAE_MEMBER_BRANCH_MAP[member]}"
+            # 2순위: 보내는분(병원) 정보로 판별
+            code = clean_text(str(row.get('주문코드', '') or ''))
+            search_text = ' '.join(filter(None, [
+                clinic, member,
+                clean_text(str(row.get('발송정보', '') or '')),
+                clean_text(str(row.get('배송정보', '') or '')),
+                addr_map.get(code, ''),
+            ]))
+            return get_gorae_branch(search_text)
+        return clinic
+
+    if df.empty:
+        return pd.Series([], dtype=object)
+    return df.apply(_one, axis=1)
+
+
+def hold_exclusion_mask(df: pd.DataFrame, clinic_series: pd.Series) -> pd.Series:
+    """미발송(입원·원내분출) 행 마스크 — 라벨/마스터 정리에서 같은 규칙을 쓴다.
+      입원     → 고래 관저·판암만 미발송 (오창·세종은 입원이어도 발송)
+      원내분출 → 고래 세종만 미발송 (분출/불출/분줄/불줄 오타 허용)"""
+    excl = pd.Series([False] * len(df), index=df.index)
+    if df.empty:
+        return excl
+    _clinic_s = clinic_series.astype(str)
+    _ship_inpatient = _clinic_s.str.contains('오창|세종', na=False, regex=True)
+    _sejong = _clinic_s.str.contains('세종', na=False)
+    for col in ['조제지시사항', '복용첨부파일']:
+        if col in df.columns:
+            # 공백 제거 후 비교 — "원내 분출" 같은 표기 흔들림도 인식
+            # ("원내발송"은 발송 대상이라 '원내'만으로는 매칭하지 않는다)
+            _s = df[col].astype(str).str.replace(r'\s+', '', regex=True)
+            excl |= _s.str.contains('입원', na=False) & ~_ship_inpatient
+            excl |= _s.str.contains(HOLD_INTERNAL_RE.pattern, na=False, regex=True) & _sejong
+    return excl
+
+
 def export_label_excel(xlsx_path: str):
     """통합 주문마스터 시트에서 라벨 인쇄용 엑셀 생성 (입원 제외)"""
     try:
@@ -2606,20 +2701,6 @@ def export_label_excel(xlsx_path: str):
         print(f"라벨 엑셀 생성 실패 (파일 읽기): {e}")
         return
 
-    # 주소 매핑 (고래한방 지점 구분용 — 같은 df에서 추출)
-    # ★ 보내는분(병원)만 사용. 받는분(환자 집) 주소는 지점 판별에서 제외.
-    #   (환자 집이 예: 관저동이면 판암점 주문도 관저로 오분류되던 버그 방지)
-    addr_map = {}
-    if '주문코드' in df.columns:
-        for _, r in df.iterrows():
-            code = clean_text(str(r.get('주문코드', '') or ''))
-            if code:
-                parts = [
-                    clean_text(str(r.get(c, '') or ''))
-                    for c in ['보내는분', '보내는분_주소']
-                ]
-                addr_map[code] = ' '.join(p for p in parts if p)
-
     # 취소 건 제외 (환불취소 상태)
     cancel_count = 0
     if '진행상태' in df.columns:
@@ -2628,42 +2709,10 @@ def export_label_excel(xlsx_path: str):
         df = df[~cancel_excl].copy()
 
     # 한의원 구분 (입원 제외 필터보다 먼저 계산 — 오창 감지에 사용)
-    def classify_clinic(row):
-        clinic = clean_text(str(row.get('한의원명', '') or ''))
-        if '고래' in clinic:
-            # 1순위: 회원명(지점 전담 주문자) 매핑이 가장 신뢰도 높음
-            member = clean_text(str(row.get('회원명', '') or ''))
-            if member in GORAE_MEMBER_BRANCH_MAP:
-                return f"고래한방_{GORAE_MEMBER_BRANCH_MAP[member]}"
-            # 2순위: 보내는분(병원) 정보로 판별 (받는분/환자 집 주소는 제외)
-            code = clean_text(str(row.get('주문코드', '') or ''))
-            search_text = ' '.join(filter(None, [
-                clinic,
-                member,
-                clean_text(str(row.get('발송정보', '') or '')),
-                clean_text(str(row.get('배송정보', '') or '')),
-                addr_map.get(code, ''),
-            ]))
-            return get_gorae_branch(search_text)
-        return clinic
+    df['한의원_구분'] = classify_clinic_series(df)
 
-    df['한의원_구분'] = df.apply(classify_clinic, axis=1)
-
-    # 미발송 제외: '입원'(고래 전 지점) 또는 '원내분출'(세종점만)
-    # 단, 오창점·세종점은 입원이어도 발송 대상 → 제외하지 않음
-    # (세종점의 '원내분출'만 예외 없이 미발송)
-    _clinic_s  = df['한의원_구분'].astype(str)
-    _ship_inpatient = _clinic_s.str.contains('오창|세종', na=False, regex=True)
-    _sejong    = _clinic_s.str.contains('세종', na=False)
-
-    excl = pd.Series([False] * len(df), index=df.index)
-    for col in ['조제지시사항', '복용첨부파일']:
-        if col in df.columns:
-            # 공백 제거 후 비교 — "원내 분출" 같은 표기 흔들림도 인식
-            # 분출/불출/분줄/불줄 오타 허용. ("원내발송"은 발송 대상이라 매칭 안 됨)
-            _s = df[col].astype(str).str.replace(r'\s+', '', regex=True)
-            excl |= _s.str.contains('입원', na=False) & ~_ship_inpatient          # 입원: 오창·세종은 발송
-            excl |= _s.str.contains(HOLD_INTERNAL_RE.pattern, na=False, regex=True) & _sejong
+    # 미발송 제외: 입원(관저·판암) / 원내분출(세종) — 마스터 정리와 같은 규칙
+    excl = hold_exclusion_mask(df, df['한의원_구분'])
     inpatient_count = int(excl.sum())
     df = df[~excl].copy()
 
@@ -8750,7 +8799,7 @@ def launch_gui():
     def on_sort_files():
         """택배/라벨 엑셀을 골라 정렬본(_정렬.xlsx)을 만든다. 원본은 그대로 둠."""
         paths = filedialog.askopenfilenames(
-            title="정렬할 파일 선택 (대한통운 양식 / 탕전 라벨 인쇄용)",
+            title="정리할 파일 선택 (대한통운 양식 / 탕전 라벨 인쇄용 / 탕전주문 마스터)",
             filetypes=[("엑셀 파일", "*.xlsx *.xls"), ("모든 파일", "*.*")],
             initialdir=output_dir_var.get() or os.path.expanduser("~"),
         )
