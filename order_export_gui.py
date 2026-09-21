@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "19.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "20.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -931,6 +931,25 @@ def is_hold_note(hospital_text: str, dispensing_note: str) -> bool:
     if HOLD_INTERNAL_RE.search(ns) and "세종" in hs:
         return True
     return False
+
+
+def is_no_ship_hold(hospital_text: str, dispensing_note: str) -> bool:
+    """실제로 '발송하지 않는' 보류 건인지 — 지점 예외까지 반영한 판정.
+      입원     → 고래 관저·판암만 미발송 (오창·세종은 입원이어도 발송)
+      원내분출 → 고래 세종만 미발송
+
+    is_hold_note 는 '입원이면 무조건 True' 라서 지점 예외가 없다.
+    입금대기 전환·벌크 제외처럼 발송 여부를 가르는 자리에서는 이 함수를 써야 한다.
+    (오창점 입원 건이 입금대기로 바뀌고 벌크에서도 빠지던 문제)
+    """
+    if not is_hold_note(hospital_text, dispensing_note):
+        return False
+    hs = re.sub(r"\s+", "", clean_text(hospital_text))
+    ns = re.sub(r"\s+", "", clean_text(dispensing_note))
+    if "입원" in ns and re.search(r"오창|세종", hs):
+        # 오창·세종은 입원이어도 발송. 단 세종 '원내분출'은 예외 없이 미발송.
+        return bool(HOLD_INTERNAL_RE.search(ns) and "세종" in hs)
+    return True
 
 
 def is_inpatient_dispense(hospital_folder_name: str, dispensing_note: str) -> bool:
@@ -3790,9 +3809,11 @@ def run_job(settings: dict, progress_callback=None):
                         msg = f"⚠ 조제지시사항 공란 — 입원 판정 불가 (탕전페이지 취득 실패 가능성): {ordercode} {patient_name}"
                         print(f"    -> {msg}")
 
-                    # 접수대기 → 입금대기 자동 전환 예약 (입원 건 / 세종 원내분출)
+                    # 접수대기 → 입금대기 자동 전환 예약 (미발송 건만)
+                    # ★ 오창·세종은 입원이어도 발송하므로 전환하지 않는다.
+                    #   (전환해 버리면 벌크 발송처리 대상에서 빠진다)
                     if settings.get("auto_change_status") and status == "접수대기" and \
-                            is_hold_note(hospital_folder_name, dispensing_note):
+                            is_no_ship_hold(hospital_folder_name, dispensing_note):
                         pending_status_changes.append({
                             "kind": "inpatient",
                             "href": href,
@@ -5192,7 +5213,9 @@ def split_bulk_boxes(orders: list, box_size: int = BULK_BOX_SIZE) -> list:
         return [orders] if n else []
     per = max(1, box_size - 1)
     return [orders[i:i + per] for i in range(0, n, per)]
-BULK_SCAN_STATUSES = ["접수대기", "조제중", "탕전중"]
+# 입금대기 포함 — 오창 입원 건이 과거 실행에서 입금대기로 바뀐 채 남아 있어
+# 벌크 스캔에 아예 잡히지 않던 문제 때문. (송장 입력 탭의 DELIVERY_TARGET_STATUSES 와 동일 범위)
+BULK_SCAN_STATUSES = ["접수대기", "입금대기", "조제중", "탕전중"]
 GORAE_BRANCHES = ["관저", "판암", "세종", "오창"]
 
 
@@ -5366,8 +5389,11 @@ def run_bulk_scan(start_date: str = "", end_date: str = "",
 
                     ordercode = clean_text(master_data.get("주문코드", "") or "")
                     hospital_folder_name = build_hospital_folder_name(hospital_name, sender_addr or receiver_addr, member_name)
-                    if is_inpatient_dispense(hospital_folder_name, dispensing_note):
-                        log(f"  ✗ 벌크 제외: 입원 건 ({ordercode or '-'})")
+                    # 미발송 보류 건만 제외. 오창·세종 입원은 발송 대상이라 남긴다.
+                    if is_gorae_hospital_folder(hospital_folder_name) and \
+                            is_no_ship_hold(hospital_folder_name, dispensing_note):
+                        log(f"  ✗ 벌크 제외: 미발송 보류 건 ({ordercode or '-'}, "
+                            f"{extract_gorae_branch(hospital_folder_name)}, {dispensing_note[:20]})")
                         continue
 
                     if not is_bulk_delivery(delivery_type, pack_count, hospital_name, combined):
