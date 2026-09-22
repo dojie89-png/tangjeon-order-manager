@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "20.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "20.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -963,10 +963,22 @@ def is_inpatient_dispense(hospital_folder_name: str, dispensing_note: str) -> bo
 # ---------- 벌크 판정 ----------
 BULK_MAX_PACKS = 30  # 팩수 미만이면 벌크 (30개 이상은 별도 박스 포장)
 
-def get_box_capacity(clinic: str, box_type: str) -> int | None:
+# 고급박스2: 작은 파우치는 부피가 작아 더 많이 들어간다
+PREMIUM_BOX2_SMALL_VOL_ML = 70   # 파우치용량이 이 값 이하면
+PREMIUM_BOX2_SMALL_CAP    = 60   # 60포까지 (그 위는 50포)
+
+
+def _pouch_volume_ml(v) -> int | None:
+    """'70ml' / '70 cc' / '70' → 70. 숫자가 없으면 None (0 과 구분해야 함)."""
+    m = re.search(r"\d+", str(v or ""))
+    return int(m.group()) if m else None
+
+
+def get_box_capacity(clinic: str, box_type: str, pouch_volume=None) -> int | None:
     """박스 유형·한의원 기준 박스당 최대 포수. None이면 분할 안 함.
     고래한방은 항상 전용박스 용량 적용 (오창 포함, 박스포장 무시).
     본가한의원은 박스포장 무관, 항상 30포 단위로 분할.
+    고급박스2는 파우치용량 70ml 이하면 60포, 그보다 크면 50포.
     """
     c = clean_text(str(clinic or ""))
     b = clean_text(str(box_type or ""))
@@ -975,7 +987,10 @@ def get_box_capacity(clinic: str, box_type: str) -> int | None:
     if "본가" in c:
         return 30  # 본가한의원: 박스포장 무관 30포 단위
     if "고급박스2" in b or "고급 박스 2" in b:
-        return 50   # 고급박스2도 50포까지 (60포는 실제로 안 들어감)
+        _vol = _pouch_volume_ml(pouch_volume)
+        if _vol is not None and _vol <= PREMIUM_BOX2_SMALL_VOL_ML:
+            return PREMIUM_BOX2_SMALL_CAP
+        return 50   # 70ml 초과는 60포가 실제로 안 들어감
     if "고급박스" in b:  # 고급박스1 또는 "고급박스"만 적힌 경우
         return 50
     return None  # 박스포장 없거나 인식 불가 → 분할 안 함
@@ -2830,7 +2845,7 @@ def export_label_excel(xlsx_path: str):
         _clinic   = str(_row.get('한의원_구분', '') or '')
         _box_type = str(_row.get('박스포장', '') or '')
         _packs    = _row.get('팩수', None)
-        _cap      = get_box_capacity(_clinic, _box_type)
+        _cap      = get_box_capacity(_clinic, _box_type, _row.get('파우치용량'))
         # 개금365: 린다이어트(파우치/박스)는 조제지시사항에 서술형으로 기재됨.
         # 30포 초과 시 2박스로 분할 → 박스당 30포 기준.
         if _cap is None and "개금" in _clinic:
