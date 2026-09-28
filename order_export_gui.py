@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "20.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "20.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3860,6 +3860,12 @@ def run_job(settings: dict, progress_callback=None):
                     # → latest_decoction에서 보완 (is_bulk_delivery·should_skip_for_cj 모두 master_data 참조)
                     if latest_decoction and not master_data.get("팩수"):
                         master_data["팩수"] = clean_text(str(latest_decoction.get("팩수", "") or ""))
+                    # ★ 조제지시사항도 탕전주문내역서에만 있다 → 같은 이유로 보완.
+                    #   빠져 있으면 should_skip_for_cj 의 입원·원내분출 제외가 항상 빈칸을 보고
+                    #   통과시켜 버린다. (한의원으로 택배 건은 벌크 판정으로 우연히 걸러졌지만
+                    #   환자 직배송인 세종 원내분출 건이 CJ 파일에 그대로 들어간 원인)
+                    if dispensing_note and not master_data.get("조제지시사항"):
+                        master_data["조제지시사항"] = dispensing_note
 
                     delivery_type = clean_text(master_data.get("배송구분", ""))
                     pack_count = master_data.get("팩수", "")
