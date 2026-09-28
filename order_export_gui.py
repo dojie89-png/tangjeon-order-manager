@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "20.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "20.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -236,7 +236,9 @@ HOSPITAL_SEARCH_MAP = {
 
 
 # ---------- 앱 설정 저장/불러오기 ----------
-def _get_config_path() -> str:
+def _legacy_config_path() -> str:
+    """예전 위치 — exe 옆. 배포 스크립트가 dist 폴더를 통째로 지우면서
+    저장 위치 설정이 날아가 결과가 dist 에 쌓이던 문제가 있어 더는 쓰지 않는다."""
     if getattr(sys, "frozen", False):
         base = os.path.dirname(sys.executable)
     else:
@@ -244,13 +246,39 @@ def _get_config_path() -> str:
     return os.path.join(base, "app_config.json")
 
 
-def load_app_config() -> dict:
+def _get_config_path() -> str:
+    """사용자별 고정 위치(%APPDATA%) — exe 를 새로 빌드하거나 옮겨도 설정이 유지된다."""
     try:
-        with open(_get_config_path(), "r", encoding="utf-8") as f:
-            import json
+        if os.name == "nt":
+            root = os.environ.get("APPDATA") or os.path.expanduser("~")
+        else:
+            root = os.path.join(os.path.expanduser("~"), ".config")
+        d = os.path.join(root, "KejinTangjeonOrder")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "app_config.json")
+    except Exception:
+        return _legacy_config_path()
+
+
+def load_app_config() -> dict:
+    import json
+    path = _get_config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {}
+        pass
+    # 새 위치에 없으면 예전 위치(exe 옆)에서 한 번 옮겨온다
+    legacy = _legacy_config_path()
+    if legacy != path:
+        try:
+            with open(legacy, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            save_app_config(cfg)
+            return cfg
+        except Exception:
+            pass
+    return {}
 
 
 def save_app_config(config: dict):
@@ -3559,9 +3587,12 @@ def run_job(settings: dict, progress_callback=None):
             base_dir = os.path.dirname(sys.executable)
         else:
             base_dir = os.path.dirname(os.path.abspath(__file__))
+        if custom_output_dir and base_dir != custom_output_dir:
+            print(f"⚠ 설정된 저장 위치를 찾을 수 없어 프로그램 폴더에 저장: {custom_output_dir}")
 
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_root = os.path.join(base_dir, f"결과_{run_timestamp}")
+        print(f"[저장 위치] {output_root}")
         decoction_pdf_dir = os.path.join(output_root, "주문내역서_pdf")
         dispense_pdf_dir = os.path.join(output_root, "조제지시서_pdf")
         dosage_pdf_dir = os.path.join(output_root, "복용법_pdf")
@@ -4166,7 +4197,9 @@ def run_job(settings: dict, progress_callback=None):
             login_driver(download_driver, ADMIN_ID, ADMIN_PW)
 
         if settings["print_dispense"] or settings.get("print_decoction"):
-            print_driver = create_print_driver(settings.get("print_printer_name", ""))
+            _pn = settings.get("print_printer_name", "")
+            print(f"\n[인쇄] 출력 프린터: {_pn or '(선택 안 함 → 윈도우 기본 프린터)'}")
+            print_driver = create_print_driver(_pn)
             login_driver(print_driver, ADMIN_ID, ADMIN_PW)
 
         seen_pdf_ordercodes = set()
@@ -8616,7 +8649,8 @@ def launch_gui():
     print_dispense_var = tk.BooleanVar(value=False)
     print_by_hospital_var = tk.BooleanVar(value=False)
     print_inpatient_last_var = tk.BooleanVar(value=False)
-    print_printer_var = tk.StringVar(value="")
+    # 마지막으로 고른 프린터를 기억 (전엔 켤 때마다 목록 첫 번째로 초기화됐다)
+    print_printer_var = tk.StringVar(value=load_app_config().get("print_printer_name", ""))
     auto_change_status_var = tk.BooleanVar(value=True)
     auto_cancel_status_var = tk.BooleanVar(value=True)
     auto_dispensing_var = tk.BooleanVar(value=True)
@@ -8686,8 +8720,16 @@ def launch_gui():
     def _refresh_printers():
         names = get_printer_list()
         printer_combo["values"] = names
-        if names and not print_printer_var.get():
+        # 저장된 프린터가 목록에 있으면 그대로, 없으면(연결 해제 등) 첫 번째로
+        if names and print_printer_var.get() not in names:
             print_printer_var.set(names[0])
+
+    def _remember_printer(_evt=None):
+        name = print_printer_var.get().strip()
+        if name:
+            save_app_config({**load_app_config(), "print_printer_name": name})
+
+    printer_combo.bind("<<ComboboxSelected>>", _remember_printer)
 
     btn_refresh_printer = ttk.Button(group3, text="↻", width=3,
                                       command=_refresh_printers)
@@ -8804,6 +8846,29 @@ def launch_gui():
 
     ttk.Button(output_dir_frame, text="찾아보기", command=_browse_output_dir, width=8).grid(row=0, column=2, sticky="e")
 
+    def _confirm_output_dir() -> bool:
+        """실행 전 저장 위치 확인. 비었거나 없는 경로면 프로그램 폴더(dist)로 조용히
+        빠지던 문제 — dist 는 빌드 때 지워질 수 있어 결과가 사라질 위험이 있다."""
+        d = output_dir_var.get().strip()
+        if d and os.path.isdir(d):
+            return True
+        if d:
+            msg = (f"설정된 저장 위치를 찾을 수 없어요:\n{d}\n\n"
+                   "지금 저장 위치를 다시 고를까요?\n"
+                   "(아니오 → 프로그램 폴더에 저장)")
+        else:
+            msg = ("저장 위치가 설정돼 있지 않아 프로그램 폴더에 저장돼요.\n"
+                   "이 폴더는 프로그램을 새로 빌드할 때 지워질 수 있어요.\n\n"
+                   "지금 저장 위치를 고를까요?\n"
+                   "(아니오 → 프로그램 폴더에 저장)")
+        ans = messagebox.askyesnocancel("저장 위치 확인", msg)
+        if ans is None:      # 취소 → 실행 안 함
+            return False
+        if ans:              # 예 → 폴더 선택
+            _browse_output_dir()
+            return bool(output_dir_var.get().strip()) and os.path.isdir(output_dir_var.get().strip())
+        return True          # 아니오 → 기본 위치로 진행
+
     status_label = ttk.Label(tab1, text="대기 중", foreground="gray")
     status_label.grid(row=7, column=0, columnspan=3, sticky="w", pady=(12, 4))
 
@@ -8893,6 +8958,8 @@ def launch_gui():
             messagebox.showwarning("실행 중", "다른 탭이 현재 실행 중입니다.\n완료 후 다시 시도해주세요.")
             return
         if not ensure_admin_credentials(root):
+            return
+        if not _confirm_output_dir():
             return
         start_date = ""
         end_date = ""
@@ -10758,6 +10825,8 @@ def launch_gui():
             messagebox.showwarning("실행 중", "다른 탭이 현재 실행 중입니다.\n완료 후 다시 시도해주세요.")
             return
         if not ensure_admin_credentials(root):
+            return
+        if not _confirm_output_dir():
             return
 
         # 상품 캐시 확인 — 없으면 미리 물어봄

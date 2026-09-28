@@ -28,7 +28,8 @@ py %PYVER% -c "import selenium, sys; print('Python:', sys.executable); print('Se
 
 echo [2/3] Cleaning previous build files...
 if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
+REM dist 폴더 통째로 지우지 않음 - 결과 폴더가 들어 있을 수 있어 exe 만 삭제
+if exist dist\order_export_gui.exe del /q dist\order_export_gui.exe
 if exist "order_export_gui.spec" del /q "order_export_gui.spec"
 
 echo [3/3] Building exe...

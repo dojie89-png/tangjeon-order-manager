@@ -46,7 +46,8 @@ if errorlevel 1 goto :fail
 call :run py %PYVER% -m pip install --upgrade pyinstaller
 if errorlevel 1 goto :fail
 if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
+REM dist 폴더 통째로 지우지 않음 - 결과 폴더가 들어 있을 수 있어 exe 만 삭제
+if exist dist\order_export_gui.exe del /q dist\order_export_gui.exe
 if exist "order_export_gui.spec" del /q "order_export_gui.spec"
 for /f "usebackq delims=" %%i in (`py %PYVER% -c "import sys, os; print(os.path.dirname(sys.executable))"`) do set PYDIR=%%i
 call :log "[Python dir] %PYDIR%"
