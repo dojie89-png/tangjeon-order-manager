@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "20.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "20.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -1679,6 +1679,14 @@ def get_printer_list() -> list:
     return printers
 
 
+def _chrome_name_pattern(printer_name: str) -> str:
+    """크롬의 namePattern 은 정규식이다. 프린터 이름을 그대로 넣으면
+    'Apeos C2560 (복사 1)' 의 괄호가 그룹으로 해석돼 매칭에 실패하고,
+    크롬은 에러 없이 기본 대상(보통 'PDF로 저장')으로 보내버린다.
+    → 특수문자를 이스케이프하고 앞뒤를 고정해 '정확히 이 이름' 만 고르게 한다."""
+    return "^" + re.sub(r"([\\^$.|?*+()\[\]{}/])", r"\\\1", printer_name) + "$"
+
+
 def create_print_driver(printer_name: str = ""):
     import json as _json
     print_options = Options()
@@ -1687,7 +1695,7 @@ def create_print_driver(printer_name: str = ""):
         prefs = {
             "printing.default_destination_selection_rules": _json.dumps({
                 "kind": "local",
-                "namePattern": printer_name,
+                "namePattern": _chrome_name_pattern(printer_name),
             }),
             "printing.print_preview_sticky_settings.appState": _json.dumps({
                 "recentDestinations": [
@@ -1826,25 +1834,65 @@ def download_attachment_by_click(download_driver, page_url: str, link_text: str,
     os.replace(downloaded_path, final_path)
 
 
-def _print_pending_count() -> int:
-    """Windows 프린트 스풀러의 현재 대기 작업 수를 반환.
-    확인 불가(비-Windows / PowerShell 실패 등)이면 -1 반환."""
-    if sys.platform != "win32":
+def _ps_with_printer(script: str, printer_name: str, timeout: int = 6):
+    """프린터 이름을 환경변수로 넘겨 PowerShell 실행 (이름의 따옴표·괄호로 명령이 깨지지 않게)."""
+    env = dict(os.environ, KJ_PRINTER=printer_name or "")
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True, text=True, timeout=timeout,
+        creationflags=_NO_WINDOW, env=env,
+    )
+
+
+def _print_pending_count(printer_name: str = "") -> int:
+    """대상 프린터의 스풀러 대기 작업 수. 확인 불가면 -1.
+    ※ Get-PrintJob 은 -PrinterName 이 필수라, 예전처럼 빼고 부르면 항상 실패해
+      '몰아서 보내지 않게' 하는 대기 로직이 한 번도 작동하지 않았다."""
+    if sys.platform != "win32" or not printer_name:
         return -1
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-PrintJob -ErrorAction SilentlyContinue | Measure-Object).Count"],
-            capture_output=True, text=True, timeout=6,
-            creationflags=_NO_WINDOW,
-        )
+        r = _ps_with_printer(
+            "(Get-PrintJob -PrinterName $env:KJ_PRINTER -ErrorAction SilentlyContinue"
+            " | Measure-Object).Count", printer_name)
         v = r.stdout.strip()
         return int(v) if v.lstrip("-").isdigit() else -1
     except Exception:
         return -1
 
 
-def print_page(print_driver, url: str, expected_ordercode: str = "") -> dict:
+# 이 상태면 인쇄를 보내도 종이가 안 나온다 (Get-Printer PrinterStatus 값)
+PRINTER_BAD_STATUSES = {
+    "Offline", "Error", "Paused", "PaperJam", "PaperOut", "NoToner", "DoorOpen",
+    "NotAvailable", "PendingDeletion", "UserIntervention", "ServerUnknown", "OutOfMemory",
+}
+
+
+def check_printer_ready(printer_name: str):
+    """인쇄 전 점검 → (level, message). level: 'ok' / 'warn'(물어보고 진행) / 'block'(중단).
+    크롬은 프린터를 못 찾으면 에러 없이 'PDF로 저장' 등으로 보내버려서
+    프로그램은 '요청완료'인데 종이는 안 나오는 일이 생긴다 → 보내기 전에 막는다."""
+    if sys.platform != "win32":
+        return "ok", ""
+    if not printer_name:
+        return "warn", "출력 프린터가 선택돼 있지 않아요.\n윈도우 기본 프린터로 인쇄돼요."
+    names = get_printer_list()
+    if names and printer_name not in names:
+        return "block", (f"선택한 프린터를 찾을 수 없어요:\n  {printer_name}\n\n"
+                         f"현재 설치된 프린터:\n  " + "\n  ".join(names) +
+                         "\n\n프린터가 다시 설치되며 이름이 바뀌었을 수 있어요.\n"
+                         "'출력 프린터'에서 다시 골라주세요.")
+    try:
+        r = _ps_with_printer("(Get-Printer -Name $env:KJ_PRINTER).PrinterStatus", printer_name)
+        status = r.stdout.strip()
+    except Exception:
+        status = ""
+    if status in PRINTER_BAD_STATUSES:
+        return "warn", (f"프린터 상태가 '{status}' 예요:\n  {printer_name}\n\n"
+                        "이대로 보내면 인쇄가 안 나올 수 있어요.")
+    return "ok", status
+
+
+def print_page(print_driver, url: str, expected_ordercode: str = "", printer_name: str = "") -> dict:
     print_driver.get(url)
     time.sleep(1.5)
     if is_login_page(print_driver):
@@ -1894,7 +1942,7 @@ def print_page(print_driver, url: str, expected_ordercode: str = "") -> dict:
     # 한꺼번에 몰리면 프린터가 작업을 드롭하는 현상 방지
     _extra_sec = 0
     while _extra_sec < 60:
-        _pending = _print_pending_count()
+        _pending = _print_pending_count(printer_name)
         if _pending < 0 or _pending <= PRINT_MAX_PENDING_JOBS:
             break
         time.sleep(2.0)
@@ -4436,7 +4484,8 @@ def run_job(settings: dict, progress_callback=None):
                 _pr_pct = 90 + int((_pr_idx / _total_print) * 8) if _total_print else 95
                 update_progress(_pr_pct, f"{kl} 출력 중... ({_pr_idx}/{_total_print}) {_pname}")
                 try:
-                    print_info = print_page(print_driver, pj["url"], pj.get("ordercode", ""))
+                    print_info = print_page(print_driver, pj["url"], pj.get("ordercode", ""),
+                                            settings.get("print_printer_name", ""))
                     _verify = "주문코드확인" if print_info.get("contains_ordercode") else "주문코드미확인"
                     print(f"{kl} 출력 요청: {pj['hospital']}\\{pj['label']} ({_verify})")
                     if not print_info.get("contains_ordercode") and pj.get("ordercode"):
@@ -8961,6 +9010,14 @@ def launch_gui():
             return
         if not _confirm_output_dir():
             return
+        # 자동 인쇄를 켰으면 보내기 전에 프린터 점검 (못 찾으면 크롬이 조용히 딴 데로 보냄)
+        if print_decoction_var.get() or print_dispense_var.get():
+            _lv, _msg = check_printer_ready(print_printer_var.get().strip())
+            if _lv == "block":
+                messagebox.showerror("프린터 확인", _msg)
+                return
+            if _lv == "warn" and not messagebox.askyesno("프린터 확인", _msg + "\n\n그래도 진행할까요?"):
+                return
         start_date = ""
         end_date = ""
         start_raw = " ".join(filter(None, [_ph_get(start_date_entry), _ph_get(start_time_entry)]))
