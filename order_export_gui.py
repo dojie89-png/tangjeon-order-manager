@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "20.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "20.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4923,8 +4923,30 @@ def send_alimtalk_for_seqnos(driver, target_seqnos: set, start_date: str = "",
     return {"sent": sent, "pages": pages_done, "not_found": len(remaining)}
 
 
+DELIVERY_LOG_DIRNAME = "발송처리_로그"
+_DELIVERY_LOG_RE = re.compile(r"^\d{8}_\d{6}_(발송처리_로그|송장입력_발송로그)\.txt$")
+
+
+def delivery_log_dir(base_dir: str) -> str:
+    """발송처리 로그 전용 폴더 (base_dir/발송처리_로그).
+    전엔 저장 폴더 맨 위에 로그가 계속 쌓였다 → 예전 로그도 여기로 옮겨 정리한다.
+    (파일명이 정확히 'YYYYMMDD_HHMMSS_발송처리_로그.txt' 형식인 것만 이동, 삭제는 안 함)"""
+    import shutil, unicodedata
+    d = os.path.join(base_dir, DELIVERY_LOG_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    try:
+        for f in os.listdir(base_dir):
+            if _DELIVERY_LOG_RE.match(unicodedata.normalize("NFC", f)):
+                src, dst = os.path.join(base_dir, f), os.path.join(d, f)
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    shutil.move(src, dst)
+    except Exception:
+        pass
+    return d
+
+
 def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str = "", log_callback=None, progress_callback=None, cancel_check=None,
-                     send_alimtalk: bool = False):
+                     send_alimtalk: bool = False, log_dir: str = ""):
     _log_lines: list = []
     _run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     alimtalk_targets: list = []   # 발송처리 성공 + 알림톡 대상
@@ -5278,9 +5300,10 @@ def run_delivery_job(detail_excel_path: str, start_date: str = "", end_date: str
             log(f"알림톡: 발송 {len(alimtalk_targets)}건 / 제외 {len(alimtalk_skipped)}건")
 
     finally:
-        # 실행 로그를 대한통운 파일과 같은 폴더에 저장 (발송 문제 원인 추적용)
+        # 실행 로그 저장 (발송 문제 원인 추적용) — 발송처리_로그 폴더가 주어지면 그곳,
+        # 아니면 예전처럼 대한통운 파일 옆
         try:
-            _log_dir = os.path.dirname(os.path.abspath(detail_excel_path))
+            _log_dir = log_dir or os.path.dirname(os.path.abspath(detail_excel_path))
             _log_path = os.path.join(_log_dir, f"{_run_ts}_송장입력_발송로그.txt")
             with open(_log_path, "w", encoding="utf-8") as _lf:
                 _lf.write(f"송장 입력·발송 처리 로그 (v{APP_VERSION})  {datetime.now():%Y-%m-%d %H:%M:%S}\n")
@@ -9405,12 +9428,19 @@ def launch_gui():
                 _log_lines.append(msg)
                 append_log(msg)
 
+            # 이번 발송처리의 로그 2종을 한 폴더(저장위치/발송처리_로그)에 모은다
+            _base_dir = output_dir_var.get().strip()
+            if not (_base_dir and os.path.isdir(_base_dir)):
+                _base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+                            else os.path.dirname(os.path.abspath(__file__))
+            try:
+                _log_dir = delivery_log_dir(_base_dir)
+            except Exception:
+                _log_dir = _base_dir
+
             def _save_delivery_log():
                 try:
-                    _save_dir = output_dir_var.get().strip()
-                    if not (_save_dir and os.path.isdir(_save_dir)):
-                        _save_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
-                                    else os.path.dirname(os.path.abspath(__file__))
+                    _save_dir = _log_dir
                     _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     _log_path = os.path.join(_save_dir, f"{_ts}_발송처리_로그.txt")
                     with open(_log_path, "w", encoding="utf-8") as _lf:
@@ -9432,6 +9462,7 @@ def launch_gui():
                         progress_callback=delivery_gui_progress,
                         cancel_check=delivery_cancel_event.is_set,
                         send_alimtalk=send_alimtalk_var.get(),
+                        log_dir=_log_dir,
                     )
                 _save_delivery_log()
                 if delivery_cancel_event.is_set():
