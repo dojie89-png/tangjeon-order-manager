@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "20.8"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "20.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2284,9 +2284,12 @@ BULK_SUMMARY_SHEET   = "벌크 요약"
 DIRECT_SUMMARY_SHEET = "직송 요약"
 # 탕전실용 처방명(단가표)이 있는 곳만 요약 대상 — 고래 4지점 + 필 3곳
 GORAE_CLINIC_PREFIX  = "고래한방"
-# 120ml·110ml은 실제로 같은 용량으로 나가므로 집계에서는 110ml로 합친다.
-POUCH_MERGE_FROM = "120ml"
-POUCH_MERGE_TO   = "110ml"
+# 실제로 같은 용량으로 나가는 것들은 집계에서 110ml로 합친다.
+#   공통   : 120ml → 110ml
+#   필한방 : 100ml → 110ml (필 3곳 중 100ml 로 적는 곳)
+POUCH_MERGE_TO     = "110ml"
+POUCH_MERGE_COMMON = (120,)
+POUCH_MERGE_PIL    = (100,)
 MERGED_VOLUME_COL = "통합용량"
 # 요약표에서 '표준'이 아닌 값은 초록 배경으로 눈에 띄게 (현장 확인용)
 SUMMARY_STD_VOLUME = "110ml"
@@ -2296,13 +2299,23 @@ SUMMARY_GRAY       = "FFF2F2F2"
 SUMMARY_FONT       = "맑은 고딕"
 
 
-def merge_pouch_volume(v) -> str:
-    """파우치용량 통합 표기 — 120ml은 110ml로 합침. 그 외는 그대로."""
+def is_pil_clinic(clinic) -> bool:
+    """필한방 3곳(대전필·청주필·성동필) — 한의원_구분에 모두 '필한방'이 들어 있다."""
+    return "필한방" in clean_text(str(clinic or ""))
+
+
+def _merge_from_ml(clinic="") -> tuple:
+    """이 한의원에서 110ml로 합칠 용량(ml) 목록."""
+    return POUCH_MERGE_COMMON + (POUCH_MERGE_PIL if is_pil_clinic(clinic) else ())
+
+
+def merge_pouch_volume(v, clinic="") -> str:
+    """파우치용량 통합 표기 — 120ml(공통)·100ml(필한방만)는 110ml로 합침. 그 외는 그대로."""
     s = clean_text(str(v or ''))
     if not s:
         return ''
     m = re.match(r'^(\d+)\s*(ml|cc)?$', s, re.I)
-    if m and int(m.group(1)) == 120:
+    if m and int(m.group(1)) in _merge_from_ml(clinic):
         return POUCH_MERGE_TO
     return s
 
@@ -2375,18 +2388,24 @@ def split_label_sheets(sorted_df: pd.DataFrame) -> dict:
 
 
 def add_merged_volume_col(bulk_df: pd.DataFrame) -> pd.DataFrame:
-    """벌크 시트 맨 뒤에 '통합용량' 열 추가 (120ml→110ml).
-    값이 아니라 수식으로 넣어, 파우치용량을 고쳐도 요약표가 따라 움직이게 한다."""
+    """시트 맨 뒤에 '통합용량' 열 추가 (120ml→110ml, 필한방은 100ml→110ml 도).
+    값이 아니라 수식으로 넣어, 파우치용량을 고쳐도 요약표가 따라 움직이게 한다.
+    한의원마다 합치는 용량이 달라 행마다 수식이 다르다."""
     from openpyxl.utils import get_column_letter
     df = bulk_df.copy()
     if '파우치용량' not in df.columns or df.empty:
         df[MERGED_VOLUME_COL] = ''
         return df
     vol_letter = get_column_letter(list(df.columns).index('파우치용량') + 1)
-    df[MERGED_VOLUME_COL] = [
-        f'=IF(${vol_letter}{i + 2}="{POUCH_MERGE_FROM}","{POUCH_MERGE_TO}",${vol_letter}{i + 2})'
-        for i in range(len(df))
-    ]
+    clinics = (df['한의원_구분'].fillna('').astype(str).tolist()
+               if '한의원_구분' in df.columns else [''] * len(df))
+    formulas = []
+    for i, clinic in enumerate(clinics):
+        cell = f"${vol_letter}{i + 2}"
+        conds = [f'{cell}="{n}ml"' for n in _merge_from_ml(clinic)]
+        cond = conds[0] if len(conds) == 1 else f"OR({','.join(conds)})"
+        formulas.append(f'=IF({cond},"{POUCH_MERGE_TO}",{cell})')
+    df[MERGED_VOLUME_COL] = formulas
     return df
 
 
@@ -2401,16 +2420,8 @@ def _summary_ymd(df: pd.DataFrame) -> str:
     return f"{m.group(1)[2:]}{m.group(2)}{m.group(3)}" if m else ''
 
 
-def build_count_summary_sheet(wb, sheet_name: str, title: str, col_specs: list,
-                              after_sheet: str = None):
-    """건수 요약 시트 생성 — 처방명_탕전실용 × 통합용량 × 팩수 별 한의원 건수 표.
-
-    col_specs: [{'label': 한의원_구분 값, 'sheet': 세어올 시트명, 'df': 그 시트 df}, ...]
-      열마다 참조 시트가 달라도 된다 (직송 요약은 고래=직송 시트, 필은 각자 시트).
-    건수는 COUNTIFS 수식이라 원본 시트를 손으로 고쳐도 자동으로 다시 계산된다."""
-    from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-
+def _prepare_count_specs(col_specs: list, sheet_name: str) -> list:
+    """열 정의에서 실제 행이 있는 것만 남긴다 (각 spec 에 'rows' 추가)."""
     need = ['한의원_구분', '처방명_탕전실용', '팩수', '파우치용량', MERGED_VOLUME_COL]
     specs = []
     for sp in col_specs:
@@ -2424,20 +2435,14 @@ def build_count_summary_sheet(wb, sheet_name: str, title: str, col_specs: list,
         if rows.empty:
             continue
         specs.append({**sp, 'rows': rows})
-    if not specs:
-        return None
+    return specs
 
-    # 행 키(처방명·용량·팩수)는 포함된 한의원들의 행에서만 뽑는다
-    keyset = set()
-    for sp in specs:
-        rows = sp['rows']
-        keyset |= set(zip(
-            rows['처방명_탕전실용'].fillna('').astype(str).map(clean_text),
-            rows['파우치용량'].map(merge_pouch_volume),
-            rows['팩수'].map(_label_num_key)))
-    keys = sorted(keyset, key=lambda k: (k[0], _label_num_key(k[1]), k[2]))
 
-    ws = wb.create_sheet(sheet_name)
+def _write_count_table(ws, top: int, title: str, specs: list) -> tuple:
+    """ws 의 top 행부터 요약표 하나를 그린다 → (다음 표를 시작할 수 있는 행, 마지막 열 번호).
+    제목(top) / 빈 줄 / 머리글(top+2) / 데이터 / 합계."""
+    from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
+    from openpyxl.utils import get_column_letter
     thin   = Side(style="thin")
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
     center = Alignment(horizontal="center", vertical="center")
@@ -2445,13 +2450,22 @@ def build_count_summary_sheet(wb, sheet_name: str, title: str, col_specs: list,
     gray  = PatternFill("solid", fgColor=SUMMARY_GRAY)
     green = PatternFill("solid", fgColor=SUMMARY_GREEN)
 
-    ws["B2"] = title
-    ws["B2"].font = Font(name=SUMMARY_FONT, size=9, bold=True)
+    # 행 키(처방명·통합용량·팩수) — 용량 통합 규칙이 한의원마다 달라 행 단위로 계산
+    keyset = set()
+    for sp in specs:
+        rows = sp['rows']
+        keyset |= set(zip(
+            rows['처방명_탕전실용'].fillna('').astype(str).map(clean_text),
+            [merge_pouch_volume(v, sp['label']) for v in rows['파우치용량']],
+            rows['팩수'].map(_label_num_key)))
+    keys = sorted(keyset, key=lambda k: (k[0], _label_num_key(k[1]), k[2]))
 
-    HDR_ROW = 4
+    ws.cell(row=top, column=2, value=title).font = Font(name=SUMMARY_FONT, size=9, bold=True)
+
+    hdr = top + 2
     headers = ['처방명_탕전실용', '용량', '팩수'] + [sp['label'] for sp in specs] + ['합계']
     for i, h in enumerate(headers):
-        cell = ws.cell(row=HDR_ROW, column=2 + i, value=h)
+        cell = ws.cell(row=hdr, column=2 + i, value=h)
         cell.font, cell.alignment, cell.border, cell.fill = base_font, center, border, gray
 
     def _letters(df):
@@ -2459,7 +2473,7 @@ def build_count_summary_sheet(wb, sheet_name: str, title: str, col_specs: list,
         return tuple(get_column_letter(cols.index(n) + 1)
                      for n in ('한의원_구분', '처방명_탕전실용', '팩수', MERGED_VOLUME_COL))
 
-    first_data = HDR_ROW + 1
+    first_data = hdr + 1
     tot_col = 5 + len(specs)
     for ri, (p, v, pk) in enumerate(keys):
         r = first_data + ri
@@ -2476,7 +2490,7 @@ def build_count_summary_sheet(wb, sheet_name: str, title: str, col_specs: list,
             src = sp['sheet']
             c_clinic, c_pres, c_packs, c_vol = _letters(sp['df'])
             cell = ws.cell(row=r, column=col, value=(
-                f"=COUNTIFS('{src}'!${c_clinic}:${c_clinic},{bl}${HDR_ROW},"
+                f"=COUNTIFS('{src}'!${c_clinic}:${c_clinic},{bl}${hdr},"
                 f"'{src}'!${c_pres}:${c_pres},$B{r},"
                 f"'{src}'!${c_packs}:${c_packs},$D{r},"
                 f"'{src}'!${c_vol}:${c_vol},$C{r})"))
@@ -2500,13 +2514,36 @@ def build_count_summary_sheet(wb, sheet_name: str, title: str, col_specs: list,
             if col == tot_col else f"=SUM({bl}{first_data}:{bl}{last_data})"))
         cell.font, cell.alignment, cell.border = base_font, center, border
 
+    for r in range(top, sum_row + 1):
+        ws.row_dimensions[r].height = 15.0
+    return sum_row + 3, tot_col   # 표 사이 빈 줄 2개
+
+
+def build_count_summary_sheet(wb, sheet_name: str, blocks: list, after_sheet: str = None):
+    """건수 요약 시트 생성 — 처방명_탕전실용 × 통합용량 × 팩수 별 한의원 건수 표.
+
+    blocks: [(표 제목, col_specs), ...] — 표를 위에서부터 차례로 쌓는다
+      col_specs: [{'label': 한의원_구분 값, 'sheet': 세어올 시트명, 'df': 그 시트 df}, ...]
+      열마다 참조 시트가 달라도 된다 (직송 요약은 고래=직송 시트, 필은 각자 시트).
+    건수는 COUNTIFS 수식이라 원본 시트를 손으로 고쳐도 자동으로 다시 계산된다.
+    행이 하나도 없는 표는 건너뛰고, 전부 비면 시트를 만들지 않는다(None)."""
+    from openpyxl.utils import get_column_letter
+    prepared = [(title, _prepare_count_specs(specs, sheet_name)) for title, specs in blocks]
+    prepared = [(t, s) for t, s in prepared if s]
+    if not prepared:
+        return None
+
+    ws = wb.create_sheet(sheet_name)
+    top, max_col = 2, 5
+    for title, specs in prepared:
+        top, last_col = _write_count_table(ws, top, title, specs)
+        max_col = max(max_col, last_col)
+
     ws.column_dimensions['A'].width = 3.625
     ws.column_dimensions['B'].width = 12.625
     ws.column_dimensions['C'].width = 10.625
-    for col in range(5, tot_col + 1):
+    for col in range(5, max_col + 1):
         ws.column_dimensions[get_column_letter(col)].width = 12.625
-    for r in range(2, sum_row + 1):
-        ws.row_dimensions[r].height = 15.0
 
     if after_sheet:
         try:
@@ -2526,30 +2563,34 @@ def build_bulk_summary_sheet(wb, bulk_df: pd.DataFrame,
     clinics = sorted({c for c in bulk_df['한의원_구분'].fillna('').astype(str).map(clean_text) if c})
     specs = [{'label': c, 'sheet': bulk_sheet_name, 'df': bulk_df} for c in clinics]
     return build_count_summary_sheet(
-        wb, BULK_SUMMARY_SHEET, f"{_summary_ymd(bulk_df)} 고래 벌크".strip(),
-        specs, after_sheet=bulk_sheet_name)
+        wb, BULK_SUMMARY_SHEET, [(f"{_summary_ymd(bulk_df)} 고래 벌크".strip(), specs)],
+        after_sheet=bulk_sheet_name)
 
 
 def build_direct_summary_sheet(wb, sheets: dict, after_sheet: str = None):
-    """'직송 요약' — 탕전실용 처방명이 따로 있는 고래 4지점 + 필 3곳만 열로 만든다.
-    고래는 직송 시트에서, 필 3곳은 각자 시트에서 센다 (시트가 나뉘어 있기 때문)."""
-    specs = []
+    """'직송 요약' — 탕전실용 처방명이 따로 있는 고래 4지점 / 필 3곳을 표 두 개로 나눠 만든다.
+    (한 표에 섞으면 헷갈린다) 고래는 직송 시트에서, 필 3곳은 각자 시트에서 센다."""
     direct = sheets.get(LABEL_SHEET_DIR_TANGJEON)
+    gorae_specs, pil_specs = [], []
     if direct is not None and not direct.empty:
         clinics = sorted({c for c in direct['한의원_구분'].fillna('').astype(str).map(clean_text)
                           if c.startswith(GORAE_CLINIC_PREFIX)})
-        specs += [{'label': c, 'sheet': LABEL_SHEET_DIR_TANGJEON, 'df': direct} for c in clinics]
+        gorae_specs = [{'label': c, 'sheet': LABEL_SHEET_DIR_TANGJEON, 'df': direct} for c in clinics]
     for name, _ in LABEL_PIL_SHEETS:
         pil = sheets.get(name)
         if pil is None or pil.empty:
             continue
         clinics = sorted({c for c in pil['한의원_구분'].fillna('').astype(str).map(clean_text) if c})
-        specs += [{'label': c, 'sheet': name, 'df': pil} for c in clinics]
-    if not specs:
+        pil_specs += [{'label': c, 'sheet': name, 'df': pil} for c in clinics]
+    if not gorae_specs and not pil_specs:
         return None
-    ymd = _summary_ymd(direct if direct is not None and not direct.empty else specs[0]['df'])
+    src = direct if direct is not None and not direct.empty else (pil_specs or gorae_specs)[0]['df']
+    ymd = _summary_ymd(src)
     return build_count_summary_sheet(
-        wb, DIRECT_SUMMARY_SHEET, f"{ymd} 고래·필 직송".strip(), specs, after_sheet=after_sheet)
+        wb, DIRECT_SUMMARY_SHEET,
+        [(f"{ymd} 고래 직송".strip(), gorae_specs),
+         (f"{ymd} 필한방 직송".strip(), pil_specs)],
+        after_sheet=after_sheet)
 
 
 # 정렬 중 원본 행 번호를 들고 다니는 임시 열 (저장 직전에 제거)
