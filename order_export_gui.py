@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "20.9"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "21.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2706,9 +2706,21 @@ def clean_master_copy(src_path: str, out_path: str, log=print) -> int:
     return len(drop_rows)
 
 
+def _next_sorted_path(src: Path) -> Path:
+    """'{원본}_정렬.xlsx'. 이미 있으면 '{원본}_정렬(2).xlsx', (3)… 으로 — 덮어쓰지 않는다.
+    덮어쓰면 ① 이전 정렬본이 엑셀에 열려 있을 때 저장이 실패해 '다시 돌려도 안 바뀐' 것처럼 보이고
+    ② 손으로 고친 정렬본이 조용히 지워질 수 있다."""
+    p = src.parent / f"{src.stem}_정렬.xlsx"
+    i = 2
+    while p.exists():
+        p = src.parent / f"{src.stem}_정렬({i}).xlsx"
+        i += 1
+    return p
+
+
 def make_sorted_copy(src_path: str, log=print) -> str:
     """다운로드한 택배/라벨/마스터 파일을 정리한 '복사본'을 만든다.
-    원본은 손대지 않고 '{원본이름}_정렬.xlsx' 로 옆에 저장.
+    원본은 손대지 않고 '{원본이름}_정렬.xlsx' 로 옆에 저장 (이미 있으면 _정렬(2), (3)…).
       - 택배(CJ) : 상호 → 보내는분주소 → 품목명 순 정렬 (원본 서식 유지)
       - 라벨     : 벌크여부 → 한의원_구분 → 처방명_탕전실용 → 파우치용량 → 팩수 → 환자명 순
                    정렬 후 전체(주문순)/벌크/직송/필 시트로 분리 + 벌크·직송 요약
@@ -2725,12 +2737,15 @@ def make_sorted_copy(src_path: str, log=print) -> str:
             "택배(대한통운)·탕전 라벨 인쇄용·탕전주문 마스터 중 어느 것도 아닌 것 같아요.\n"
             f"첫 시트 열: {', '.join(str(c) for c in list(df.columns)[:10])} ...")
 
-    out_path = src.parent / f"{src.stem}_정렬.xlsx"
+    out_path = _next_sorted_path(src)
 
     if kind == 'master':
         removed = clean_master_copy(str(src), str(out_path), log)
         log(f"[정렬] 마스터 파일 — 미발송(입원·원내분출) {removed}행 삭제, no. 재부여")
     elif kind == 'cj':
+        # ★ 칸 형식을 원본 그대로 다시 읽는다. 위의 dtype=str 로 쓰면 기본운임·박스수량이
+        #   숫자 → 글자('1', '2800')로 바뀌어, 대한통운 업로드가 '최대 전송건수 초과'로 거부됐다.
+        df = pd.read_excel(str(src), sheet_name=0, dtype=object)
         # 원본 서식(묶음·합포 노란 채우기 등)을 행을 따라 옮긴다.
         # pandas 는 값만 읽으므로 그냥 다시 쓰면 색이 통째로 사라진다.
         styles = capture_sheet_styles(str(src))
