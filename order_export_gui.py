@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "21.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "21.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2706,21 +2706,28 @@ def clean_master_copy(src_path: str, out_path: str, log=print) -> int:
     return len(drop_rows)
 
 
-def _next_sorted_path(src: Path) -> Path:
+# 프로그램 실행 때 자동으로 만드는 정렬본은 결과 폴더 안 이 하위 폴더에 모은다
+SORTED_SUBDIR = "정렬본"
+
+
+def _next_sorted_path(src: Path, out_dir=None) -> Path:
     """'{원본}_정렬.xlsx'. 이미 있으면 '{원본}_정렬(2).xlsx', (3)… 으로 — 덮어쓰지 않는다.
     덮어쓰면 ① 이전 정렬본이 엑셀에 열려 있을 때 저장이 실패해 '다시 돌려도 안 바뀐' 것처럼 보이고
-    ② 손으로 고친 정렬본이 조용히 지워질 수 있다."""
-    p = src.parent / f"{src.stem}_정렬.xlsx"
+    ② 손으로 고친 정렬본이 조용히 지워질 수 있다.
+    out_dir 를 주면 그 폴더에 (없으면 만든다), 아니면 원본 옆에."""
+    folder = Path(out_dir) if out_dir else src.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    p = folder / f"{src.stem}_정렬.xlsx"
     i = 2
     while p.exists():
-        p = src.parent / f"{src.stem}_정렬({i}).xlsx"
+        p = folder / f"{src.stem}_정렬({i}).xlsx"
         i += 1
     return p
 
 
-def make_sorted_copy(src_path: str, log=print) -> str:
+def make_sorted_copy(src_path: str, log=print, out_dir=None) -> str:
     """다운로드한 택배/라벨/마스터 파일을 정리한 '복사본'을 만든다.
-    원본은 손대지 않고 '{원본이름}_정렬.xlsx' 로 옆에 저장 (이미 있으면 _정렬(2), (3)…).
+    원본은 손대지 않고 '{원본이름}_정렬.xlsx' 로 저장 — out_dir 가 없으면 원본 옆 (이미 있으면 _정렬(2), (3)…).
       - 택배(CJ) : 상호 → 보내는분주소 → 품목명 순 정렬 (원본 서식 유지)
       - 라벨     : 벌크여부 → 한의원_구분 → 처방명_탕전실용 → 파우치용량 → 팩수 → 환자명 순
                    정렬 후 전체(주문순)/벌크/직송/필 시트로 분리 + 벌크·직송 요약
@@ -2737,7 +2744,7 @@ def make_sorted_copy(src_path: str, log=print) -> str:
             "택배(대한통운)·탕전 라벨 인쇄용·탕전주문 마스터 중 어느 것도 아닌 것 같아요.\n"
             f"첫 시트 열: {', '.join(str(c) for c in list(df.columns)[:10])} ...")
 
-    out_path = _next_sorted_path(src)
+    out_path = _next_sorted_path(src, out_dir)
 
     if kind == 'master':
         removed = clean_master_copy(str(src), str(out_path), log)
@@ -3142,6 +3149,7 @@ def export_label_excel(xlsx_path: str):
     print("  [한의원별 건수]")
     for clinic, cnt in label_df['한의원_구분'].value_counts().items():
         print(f"    {clinic}: {cnt}건")
+    return str(out_path)
 
 
 # ---------- 병원 대표 연락처 (CJ 업로드 양식 보내는분 자동 입력 / 폴백용) ----------
@@ -3697,6 +3705,7 @@ def run_job(settings: dict, progress_callback=None):
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_root = os.path.join(base_dir, f"결과_{run_timestamp}")
         print(f"[저장 위치] {output_root}")
+        _sortable_outputs: list = []   # 정렬본을 만들 대상 (마스터·라벨·대한통운)
         decoction_pdf_dir = os.path.join(output_root, "주문내역서_pdf")
         dispense_pdf_dir = os.path.join(output_root, "조제지시서_pdf")
         dosage_pdf_dir = os.path.join(output_root, "복용법_pdf")
@@ -4225,8 +4234,11 @@ def run_job(settings: dict, progress_callback=None):
                 if settings.get("save_decoction_sheet") and not excel_decoction_df.empty:
                     excel_decoction_df.to_excel(writer, sheet_name="탕전주문내역서", index=False)
             print(f"\n엑셀 저장 완료: {excel_path}")
+            _sortable_outputs.append(excel_path)
             if settings.get("save_label_excel"):
-                export_label_excel(excel_path)
+                _label_path = export_label_excel(excel_path)
+                if _label_path:
+                    _sortable_outputs.append(_label_path)
 
         if settings.get("save_cj_excel") and master_results:
             ensure_dir(output_root)
@@ -4253,6 +4265,18 @@ def run_job(settings: dict, progress_callback=None):
                 except Exception as _e:
                     print(f"[경고] 노란색 하이라이트 적용 실패: {_e}")
             print(f"대한통운 파일 업로드 양식 저장: {cj_path}")
+            _sortable_outputs.append(cj_path)
+
+        # 인쇄용 정렬본 — 원본은 그대로 두고 '정렬본' 하위 폴더에 같이 만든다.
+        # (실패해도 본 작업은 계속. 손으로 고친 파일은 '인쇄용 정렬본 만들기' 버튼으로 다시)
+        if settings.get("save_sorted_copies") and _sortable_outputs:
+            _sorted_dir = os.path.join(output_root, SORTED_SUBDIR)
+            print(f"\n[정렬본] {_sorted_dir}")
+            for _src in _sortable_outputs:
+                try:
+                    make_sorted_copy(_src, log=print, out_dir=_sorted_dir)
+                except Exception as _e:
+                    print(f"[정렬본] {os.path.basename(_src)} 생성 실패: {_e}")
 
         if settings.get("save_bulk_excel") and master_results:
             ensure_dir(output_root)
@@ -8801,6 +8825,10 @@ def launch_gui():
     cb_save_bulk_excel.grid(row=3, column=0, sticky="w", padx=(16, 0))
     ttk.Checkbutton(group1, text="대한통운 파일 업로드 양식 생성", variable=save_cj_excel_var).grid(row=4, column=0, sticky="w")
     ttk.Checkbutton(group1, text="라벨 인쇄용 엑셀 생성", variable=save_label_excel_var).grid(row=5, column=0, sticky="w")
+    # 원본은 그대로, 결과 폴더 안 '정렬본' 폴더에 인쇄용 정렬본(마스터·라벨·대한통운)을 같이 만든다
+    save_sorted_copies_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(group1, text="인쇄용 정렬본 함께 생성",
+                    variable=save_sorted_copies_var).grid(row=6, column=0, sticky="w")
 
     def _update_save_excel_sub(*_):
         state = "normal" if save_excel_var.get() else "disabled"
@@ -9171,6 +9199,7 @@ def launch_gui():
             "sort_oldest_first": sort_oldest_first_var.get(),
             "save_cj_excel": save_cj_excel_var.get(),
             "save_label_excel": save_label_excel_var.get(),
+            "save_sorted_copies": save_sorted_copies_var.get(),
             "save_decoction_pdf": save_decoction_pdf_var.get(),
             "save_dispense_pdf": save_dispense_pdf_var.get(),
             "save_dosage_text_pdf": save_dosage_text_pdf_var.get(),
