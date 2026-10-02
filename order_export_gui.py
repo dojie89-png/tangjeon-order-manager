@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "21.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "21.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2208,6 +2208,7 @@ def lookup_tangjeon_room_name(clinic: str, pres_name: str, pres_note: str = "") 
     return base   # 표에 없는 처방은 처방명 그대로
 
 
+# 처방명 → 영문 라벨코드 (고래 판암 전체 + 오창 벌크 라벨에 공용)
 GORAE_PANAK_CODE_MAP = {
     "위당귀수산": "WDGSS",
     "위당귀수산(평위산 합방)": "WDGSS",
@@ -3037,9 +3038,11 @@ def export_label_excel(xlsx_path: str):
     else:
         label_df['처방비고'] = ''
 
-    # 고래한방_판암 한정 영문코드 컬럼 추가 (맨 오른쪽)
+    # 영문 라벨코드 컬럼 — 고래 판암(전체) / 고래 오창(벌크만). 코드표는 공용.
     def get_panak_code(row):
-        if row.get('한의원_구분') != '고래한방_판암':
+        _clinic = row.get('한의원_구분')
+        _is_bulk = clean_text(str(row.get('벌크여부', '') or '')) == '벌크'
+        if not (_clinic == '고래한방_판암' or (_clinic == '고래한방_오창' and _is_bulk)):
             return ''
         pres = clean_text(str(row.get('처방명', '') or ''))
         # 공백 유무 표기 차이 흡수 ("당귀수산제1가감" / "당귀수산 제1가감" 모두 인식)
