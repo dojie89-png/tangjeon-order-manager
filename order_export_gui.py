@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "21.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "21.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3052,6 +3052,9 @@ def export_label_excel(xlsx_path: str):
             name = clean_text(name)
             if not name:
                 return ''
+            # 같은 처방의 다른 표기 → 코드표 표기로 (탕전실용 처방명 단가표와 같은 기준)
+            #   '당귀수산 합 평위산' = 위당귀수산 → 가감 번호도 그대로 따라감 (제1가감 → WDGSS1)
+            name = re.sub(r'당귀수산\s*합\s*평위산', '위당귀수산', name)
             return GORAE_PANAK_CODE_MAP.get(name) or _nospace.get(re.sub(r'\s+', '', name), '')
 
         code = _code_of(pres)
