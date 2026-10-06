@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "21.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "21.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2169,6 +2169,12 @@ def _norm_pres_name(s: str) -> str:
     return re.sub(r"\s+", "", clean_text(str(s or "")))
 
 
+def _strip_paren_notes(name: str) -> str:
+    """처방명에서 괄호 메모를 모두 뺀다 (위치 무관). 예: 'A(메모) 제1가감' → 'A 제1가감'"""
+    s = re.sub(r"\s*[(（][^)）]*[)）]\s*", " ", clean_text(str(name or "")))
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def lookup_tangjeon_room_name(clinic: str, pres_name: str, pres_note: str = "") -> str:
     """한의원 + 처방명(+비고)으로 탕전실용 처방명을 찾는다.
 
@@ -2191,16 +2197,26 @@ def lookup_tangjeon_room_name(clinic: str, pres_name: str, pres_note: str = "") 
     note = clean_text(str(pres_note or ""))
     if note:
         cands.append(f"{base}({note})")
-    trimmed = base
-    # TA 를 먼저 떼야 그 앞의 '가감'까지 단계적으로 벗겨진다.
-    #   예) 당귀지통탕가감TA → 당귀지통탕가감 → 당귀지통탕
-    #   '가감탕'(예: 귀비온담탕 가감탕)도 '가감방'과 같은 가감 표기라 함께 제거한다.
-    for pat in (r"\s*[Tt][Aa]\s*$", r"제\s*\d+\s*가감\s*$",
-                r"가감[방탕]\d*\s*$", r"가감\s*$", r"가미\s*$"):
-        new = re.sub(pat, "", trimmed).strip()
-        if new and new != trimmed:
-            trimmed = new
-            cands.append(trimmed)
+
+    def _suffix_cands(start: str) -> list:
+        # TA 를 먼저 떼야 그 앞의 '가감'까지 단계적으로 벗겨진다.
+        #   예) 당귀지통탕가감TA → 당귀지통탕가감 → 당귀지통탕
+        #   '가감탕'(예: 귀비온담탕 가감탕)도 '가감방'과 같은 가감 표기라 함께 제거한다.
+        out, trimmed = [], start
+        for pat in (r"\s*[Tt][Aa]\s*$", r"제\s*\d+\s*가감\s*$",
+                    r"가감[방탕]\d*\s*$", r"가감\s*$", r"가미\s*$"):
+            new = re.sub(pat, "", trimmed).strip()
+            if new and new != trimmed:
+                trimmed = new
+                out.append(trimmed)
+        return out
+
+    cands += _suffix_cands(base)
+    # 괄호는 참고 메모라 위치와 상관없이 뺀 이름으로도 찾는다 (원래 이름이 우선)
+    #   예: '당귀수산 합 평위산(위당귀수산) 제1가감' → '당귀수산 합 평위산 제1가감'
+    bare = _strip_paren_notes(base)
+    if bare and bare != base:
+        cands += [bare] + _suffix_cands(bare)
     for c in cands:
         hit = norm_map.get(_norm_pres_name(c))
         if hit:
@@ -3055,7 +3071,14 @@ def export_label_excel(xlsx_path: str):
             # 같은 처방의 다른 표기 → 코드표 표기로 (탕전실용 처방명 단가표와 같은 기준)
             #   '당귀수산 합 평위산' = 위당귀수산 → 가감 번호도 그대로 따라감 (제1가감 → WDGSS1)
             name = re.sub(r'당귀수산\s*합\s*평위산', '위당귀수산', name)
-            return GORAE_PANAK_CODE_MAP.get(name) or _nospace.get(re.sub(r'\s+', '', name), '')
+            hit = GORAE_PANAK_CODE_MAP.get(name) or _nospace.get(re.sub(r'\s+', '', name), '')
+            if not hit:
+                # 괄호는 참고 메모라 위치와 상관없이 빼고 다시 찾는다
+                #   예: '당귀수산 합 평위산(위당귀수산) 제1가감' → '위당귀수산 제1가감'
+                bare = _strip_paren_notes(name)
+                if bare != name:
+                    hit = GORAE_PANAK_CODE_MAP.get(bare) or _nospace.get(re.sub(r'\s+', '', bare), '')
+            return hit
 
         code = _code_of(pres)
         note = clean_text(str(row.get('처방비고', '') or ''))
