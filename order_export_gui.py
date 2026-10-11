@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "21.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "21.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -1005,22 +1005,25 @@ def _pouch_volume_ml(v) -> int | None:
 
 def get_box_capacity(clinic: str, box_type: str, pouch_volume=None) -> int | None:
     """박스 유형·한의원 기준 박스당 최대 포수. None이면 분할 안 함.
-    고래한방은 항상 전용박스 용량 적용 (오창 포함, 박스포장 무시).
-    본가한의원은 박스포장 무관, 항상 30포 단위로 분할.
-    고급박스(1·2 공통)는 파우치용량 70ml 이하면 60포, 그보다 크면 50포.
+    판정 순서:
+      1) 고래한방 — 항상 전용박스 30포 (오창 포함, 박스포장 무시)
+      2) 고급박스(1·2 공통) — 한의원 상관없이 50포까지 한 박스,
+         파우치용량 70ml 이하면 60포까지
+      3) 본가한의원 — 고급박스 표시가 없을 때만 30포 단위
+    ※ 예전엔 본가 30포가 고급박스보다 먼저 걸려, 본가 고급박스2 45포가 23/22 로 쪼개졌다.
     """
     c = clean_text(str(clinic or ""))
     b = clean_text(str(box_type or ""))
     if "고래" in c:
         return 30  # 관저·판암·세종·오창 등 모든 고래 지점 30포 (큰박스 폐지)
-    if "본가" in c:
-        return 30  # 본가한의원: 박스포장 무관 30포 단위
     # 고급박스1 / 고급박스2 / "고급박스"만 적힌 경우 — 띄어쓴 표기도 인식
     if re.search(r"고급\s*박스", b):
         _vol = _pouch_volume_ml(pouch_volume)
         if _vol is not None and _vol <= PREMIUM_BOX_SMALL_VOL_ML:
             return PREMIUM_BOX_SMALL_CAP
         return PREMIUM_BOX_CAP   # 70ml 초과는 60포가 실제로 안 들어감
+    if "본가" in c:
+        return 30  # 본가한의원: 고급박스 표시가 없으면 30포 단위
     return None  # 박스포장 없거나 인식 불가 → 분할 안 함
 
 
