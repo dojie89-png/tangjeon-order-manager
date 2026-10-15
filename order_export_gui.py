@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "21.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "21.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3424,9 +3424,11 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder", "한의원_구분"]
         )
         _note = clean_text(row.get("조제지시사항", "") or "")
-        if is_hold_note(_hosp_text, _note):
-            if ("오창" in _hosp_text or "세종" in _hosp_text) and "입원" in re.sub(r"\s+", "", _note):
-                return False  # 오창점·세종점 입원 → 제외 안 함 (발송)
+        # 실제 미발송(관저·판암 입원 / 세종 원내분출)만 여기서 제외한다.
+        # ★ 오창·세종 입원은 '발송 대상'일 뿐 CJ 직송이라는 뜻이 아니다 → 여기서 결론 내지 말고
+        #   아래 일반 판정(한의원으로 택배 = 벌크 → CJ 제외 등)으로 넘긴다.
+        #   (예전엔 여기서 바로 '포함'으로 끝내, 오창 입원 벌크 건이 CJ 파일에 들어갔다)
+        if is_no_ship_hold(_hosp_text, _note):
             return True
         hospital = clean_text(row.get("한의원명", "") or row.get("보내는분", "") or "")
         delivery_type = clean_text(row.get("배송구분", ""))
