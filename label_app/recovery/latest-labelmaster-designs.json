@@ -3710,8 +3710,8 @@
           "fontWeight": "normal",
           "color": "#000000",
           "id": "prescription_1777511172587_1_bx99",
-          "dataKey": "처방명",
-          "layerName": "처방명"
+          "dataKey": "라벨코드",
+          "layerName": "라벨코드"
         },
         {
           "type": "excel_text",
