@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "22.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "22.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -2613,6 +2613,97 @@ def build_direct_summary_sheet(wb, sheets: dict, after_sheet: str = None):
         after_sheet=after_sheet)
 
 
+PIL_LIST_SHEET = "필한방 리스트"
+PIL_LIST_COLS  = ['한의원_구분', '환자명', '처방명_탕전실용', '팩수', '파우치용량', '처방명', '비고']
+
+
+def _pil_list_note(row) -> str:
+    """비고 — 값이 있는 것만 모은다 (없으면 빈칸: 손으로 적을 자리)."""
+    parts = []
+    for c, v in row.items():
+        if str(c).startswith('조제지시사항'):
+            s = clean_text(str(v or ''))
+            if s and s.lower() != 'nan':
+                parts.append(s)
+    box = clean_text(str(row.get('박스번호', '') or ''))
+    if box and box.lower() != 'nan':
+        parts.append(f"박스 {box}")
+    for c in ('합포여부', '묶음배송', '주소확인'):
+        s = clean_text(str(row.get(c, '') or ''))
+        if s and s.lower() != 'nan':
+            parts.append(s)
+    return " / ".join(parts)
+
+
+def build_pil_list_sheet(wb, sheets: dict, after_sheet: str = None):
+    """'필한방 리스트' — 필 3곳 직송 건을 한 표로 나열 (요약 아님).
+    필한방 라벨에는 처방명이 '개인맞춤첩약'으로만 찍혀, 탕전실에서 포장할 때
+    환자명과 처방을 맞춰 볼 수 없다 → 환자별로 탕전실용 처방명을 바로 보게 한다.
+    정렬은 필 시트와 같은 기준(LABEL_SORT_KEYS), 강조는 요약표와 같은 기준
+    (통합용량이 110ml 아님 / 팩수 14 아님 → 초록). 파우치용량은 실제 값을 보여준다."""
+    from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    parts = [sheets.get(n) for n, _ in LABEL_PIL_SHEETS]
+    parts = [p for p in parts if p is not None and not p.empty]
+    if not parts:
+        return None
+    rows = sort_label_df(pd.concat(parts, ignore_index=True))
+
+    ws = wb.create_sheet(PIL_LIST_SHEET)
+    thin   = Side(style="thin")
+    border = Border(top=thin, bottom=thin, left=thin, right=thin)
+    center = Alignment(horizontal="center", vertical="center")
+    left   = Alignment(horizontal="left", vertical="center")
+    base_font = Font(name=SUMMARY_FONT, size=9)
+    gray  = PatternFill("solid", fgColor=SUMMARY_GRAY)
+    green = PatternFill("solid", fgColor=SUMMARY_GREEN)
+
+    ws.cell(row=2, column=2, value=f"{_summary_ymd(rows)} 필한방 리스트".strip()).font = \
+        Font(name=SUMMARY_FONT, size=9, bold=True)
+    HDR = 4
+    for i, h in enumerate(PIL_LIST_COLS):
+        cell = ws.cell(row=HDR, column=2 + i, value=h)
+        cell.font, cell.alignment, cell.border, cell.fill = base_font, center, border, gray
+
+    for ri, (_, r) in enumerate(rows.iterrows()):
+        rr = HDR + 1 + ri
+        clinic = clean_text(str(r.get('한의원_구분', '') or ''))
+        vol    = clean_text(str(r.get('파우치용량', '') or ''))
+        packs  = _label_num_key(r.get('팩수', ''))
+        pres   = clean_text(str(r.get('처방명', '') or ''))
+        if pres.startswith('[') and pres.endswith(']'):
+            pres = pres[1:-1].strip()
+        values = [clinic, clean_text(str(r.get('환자명', '') or '')),
+                  clean_text(str(r.get('처방명_탕전실용', '') or '')),
+                  packs if packs >= 0 else '', vol, pres, _pil_list_note(r)]
+        for ci, v in enumerate(values):
+            cell = ws.cell(row=rr, column=2 + ci, value=v)
+            cell.font, cell.border = base_font, border
+            cell.alignment = left if PIL_LIST_COLS[ci] in ('처방명', '비고') else center
+        # 강조 — 요약표와 같은 기준
+        if merge_pouch_volume(vol, clinic) != SUMMARY_STD_VOLUME:
+            ws.cell(row=rr, column=2 + PIL_LIST_COLS.index('파우치용량')).fill = green
+        if packs != SUMMARY_STD_PACKS:
+            ws.cell(row=rr, column=2 + PIL_LIST_COLS.index('팩수')).fill = green
+
+    ws.column_dimensions['A'].width = 3.625
+    for col, w in zip(PIL_LIST_COLS, (15, 9, 14, 6, 9, 24, 22)):
+        ws.column_dimensions[get_column_letter(2 + PIL_LIST_COLS.index(col))].width = w
+    for r in range(2, HDR + len(rows) + 1):
+        ws.row_dimensions[r].height = 15.0
+    ws.freeze_panes = ws.cell(row=HDR + 1, column=2)   # 머리글 고정 (길면 스크롤)
+
+    if after_sheet:
+        try:
+            order = wb.sheetnames
+            wb.move_sheet(PIL_LIST_SHEET,
+                          offset=(order.index(after_sheet) + 1) - order.index(PIL_LIST_SHEET))
+        except Exception:
+            pass
+    return ws
+
+
 # 정렬 중 원본 행 번호를 들고 다니는 임시 열 (저장 직전에 제거)
 _SRC_ROW_COL = "__원본행"
 
@@ -2819,6 +2910,13 @@ def make_sorted_copy(src_path: str, log=print, out_dir=None) -> str:
                     log("[정렬] 고래·필 직송 건이 없어 '직송 요약' 시트는 만들지 않음")
             except Exception as e:
                 log(f"[정렬] 직송 요약 생성 실패: {e}")
+            try:
+                _after = DIRECT_SUMMARY_SHEET if DIRECT_SUMMARY_SHEET in wb.sheetnames \
+                    else LABEL_SHEET_DIR_LABELS
+                if build_pil_list_sheet(wb, sheets, after_sheet=_after) is None:
+                    log("[정렬] 필한방 건이 없어 '필한방 리스트' 시트는 만들지 않음")
+            except Exception as e:
+                log(f"[정렬] 필한방 리스트 생성 실패: {e}")
             wb.save(str(out_path))
         except Exception as e:
             log(f"[정렬] 후처리 실패: {e}")
