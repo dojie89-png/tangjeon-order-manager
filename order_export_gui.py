@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "22.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "22.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -994,6 +994,7 @@ BULK_MAX_PACKS = 30  # 팩수 미만이면 벌크 (30개 이상은 별도 박스
 # 고급박스(1·2 공통): 작은 파우치는 부피가 작아 더 많이 들어간다
 PREMIUM_BOX_SMALL_VOL_ML = 70   # 파우치용량이 이 값 이하면
 PREMIUM_BOX_SMALL_CAP    = 60   # 60포까지 (그 위는 51포)
+PIL_BOX_CAP              = 40   # 필한방 3곳 큰 박스 (보통 박스는 20포)
 PREMIUM_BOX_CAP          = 51   # 51포로 나가는 경우가 있어 51까지 한 박스
 
 
@@ -1009,7 +1010,9 @@ def get_box_capacity(clinic: str, box_type: str, pouch_volume=None) -> int | Non
       1) 고래한방 — 항상 전용박스 30포 (오창 포함, 박스포장 무시)
       2) 고급박스(1·2 공통) — 한의원 상관없이 51포까지 한 박스,
          파우치용량 70ml 이하면 60포까지
-      3) 본가한의원 — 고급박스 표시가 없을 때만 30포 단위
+      3) 필한방 3곳(대전필·청주필·성동필) — 고급박스 표시가 없을 때 40포까지 한 박스
+         (보통 20포 박스, 40포까지 들어가는 큰 박스가 있어서)
+      4) 본가한의원 — 고급박스 표시가 없을 때만 30포 단위
     ※ 예전엔 본가 30포가 고급박스보다 먼저 걸려, 본가 고급박스2 45포가 23/22 로 쪼개졌다.
     """
     c = clean_text(str(clinic or ""))
@@ -1022,6 +1025,8 @@ def get_box_capacity(clinic: str, box_type: str, pouch_volume=None) -> int | Non
         if _vol is not None and _vol <= PREMIUM_BOX_SMALL_VOL_ML:
             return PREMIUM_BOX_SMALL_CAP
         return PREMIUM_BOX_CAP   # 70ml 초과는 60포가 실제로 안 들어감
+    if "필한방" in c:
+        return PIL_BOX_CAP  # 필 3곳: 큰 박스 40포까지 한 박스, 초과하면 나눔
     if "본가" in c:
         return 30  # 본가한의원: 고급박스 표시가 없으면 30포 단위
     return None  # 박스포장 없거나 인식 불가 → 분할 안 함
