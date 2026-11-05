@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "22.3"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "22.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -959,6 +959,17 @@ def is_hold_note(hospital_text: str, dispensing_note: str) -> bool:
     if HOLD_INTERNAL_RE.search(ns) and "세종" in hs:
         return True
     return False
+
+
+def hold_check_text(hospital_text: str, dispensing_note: str, delivery_memo: str = "") -> str:
+    """보류 판정에 쓸 메모 = 조제지시사항 + (고래만) 배송시메모.
+    고래는 가끔 '입원'·'원내분출'을 조제지시사항 대신 배송시메모에만 적는다.
+    (예: 26102914140654 임현묵 관저 — 배송시메모 '입원')
+    고래가 아닌 한의원 배송메모의 '입원'은 보류 의미가 아니어서 붙이지 않는다."""
+    memo = clean_text(delivery_memo)
+    if memo and memo.lower() != "nan" and "고래" in clean_text(hospital_text):
+        return f"{clean_text(dispensing_note)} {memo}".strip()
+    return dispensing_note
 
 
 def is_no_ship_hold(hospital_text: str, dispensing_note: str) -> bool:
@@ -2978,13 +2989,16 @@ def hold_exclusion_mask(df: pd.DataFrame, clinic_series: pd.Series) -> pd.Series
     _clinic_s = clinic_series.astype(str)
     _ship_inpatient = _clinic_s.str.contains('오창|세종', na=False, regex=True)
     _sejong = _clinic_s.str.contains('세종', na=False)
-    for col in ['조제지시사항', '복용첨부파일']:
+    _gorae = _clinic_s.str.contains('고래', na=False)
+    for col in ['조제지시사항', '복용첨부파일', '배송시메모']:
         if col in df.columns:
             # 공백 제거 후 비교 — "원내 분출" 같은 표기 흔들림도 인식
             # ("원내발송"은 발송 대상이라 '원내'만으로는 매칭하지 않는다)
             _s = df[col].astype(str).str.replace(r'\s+', '', regex=True)
-            excl |= _s.str.contains('입원', na=False) & ~_ship_inpatient
-            excl |= _s.str.contains(HOLD_INTERNAL_RE.pattern, na=False, regex=True) & _sejong
+            # 배송시메모는 고래만 본다 (hold_check_text 와 같은 규칙)
+            _scope = _gorae if col == '배송시메모' else True
+            excl |= _s.str.contains('입원', na=False) & ~_ship_inpatient & _scope
+            excl |= _s.str.contains(HOLD_INTERNAL_RE.pattern, na=False, regex=True) & _sejong & _scope
     return excl
 
 
@@ -3526,7 +3540,8 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             clean_text(str(row.get(_f, "") or ""))
             for _f in ["한의원명", "보내는분", "보내는분_주소", "회원명", "_hospital_folder", "한의원_구분"]
         )
-        _note = clean_text(row.get("조제지시사항", "") or "")
+        _note = hold_check_text(_hosp_text, clean_text(row.get("조제지시사항", "") or ""),
+                                str(row.get("배송시메모", "") or ""))
         # 실제 미발송(관저·판암 입원 / 세종 원내분출)만 여기서 제외한다.
         # ★ 오창·세종 입원은 '발송 대상'일 뿐 CJ 직송이라는 뜻이 아니다 → 여기서 결론 내지 말고
         #   아래 일반 판정(한의원으로 택배 = 벌크 → CJ 제외 등)으로 넘긴다.
@@ -4098,7 +4113,10 @@ def run_job(settings: dict, progress_callback=None):
                     dosage_text_only = clean_text(latest_decoction.get("복용법_본문", "")) if latest_decoction else ""
                     dosage_file_name = clean_text(latest_decoction.get("복용첨부파일명", "")) if latest_decoction else ""
                     order_datetime_file = format_order_datetime_for_filename(master_data.get("주문날짜", ""))
-                    inpatient = is_inpatient_dispense(hospital_folder_name, dispensing_note)
+                    # 보류 판정용: 조제지시사항 + 고래 배송시메모 ('입원'을 배송시메모에만 적는 경우)
+                    hold_note = hold_check_text(hospital_folder_name, dispensing_note,
+                                                master_data.get("배송시메모", ""))
+                    inpatient = is_inpatient_dispense(hospital_folder_name, hold_note)
 
                     # 고래한방병원인데 dispensing_note 공란이면 입원 판정 불가 경고
                     if "고래" in hospital_name and not dispensing_note:
@@ -4109,7 +4127,7 @@ def run_job(settings: dict, progress_callback=None):
                     # ★ 오창·세종은 입원이어도 발송하므로 전환하지 않는다.
                     #   (전환해 버리면 벌크 발송처리 대상에서 빠진다)
                     if settings.get("auto_change_status") and status == "접수대기" and \
-                            is_no_ship_hold(hospital_folder_name, dispensing_note):
+                            is_no_ship_hold(hospital_folder_name, hold_note):
                         pending_status_changes.append({
                             "kind": "inpatient",
                             "href": href,
@@ -5733,10 +5751,12 @@ def run_bulk_scan(start_date: str = "", end_date: str = "",
                     ordercode = clean_text(master_data.get("주문코드", "") or "")
                     hospital_folder_name = build_hospital_folder_name(hospital_name, sender_addr or receiver_addr, member_name)
                     # 미발송 보류 건만 제외. 오창·세종 입원은 발송 대상이라 남긴다.
+                    hold_note = hold_check_text(hospital_folder_name, dispensing_note,
+                                                master_data.get("배송시메모", ""))
                     if is_gorae_hospital_folder(hospital_folder_name) and \
-                            is_no_ship_hold(hospital_folder_name, dispensing_note):
+                            is_no_ship_hold(hospital_folder_name, hold_note):
                         log(f"  ✗ 벌크 제외: 미발송 보류 건 ({ordercode or '-'}, "
-                            f"{extract_gorae_branch(hospital_folder_name)}, {dispensing_note[:20]})")
+                            f"{extract_gorae_branch(hospital_folder_name)}, {hold_note[:20]})")
                         continue
 
                     if not is_bulk_delivery(delivery_type, pack_count, hospital_name, combined):
