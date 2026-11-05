@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "22.4"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "22.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -11591,6 +11591,15 @@ def launch_gui():
             root.after(0, _refresh_goods_status_label)
 
     root.after(4000, lambda: threading.Thread(target=_startup_gh_cache_sync, daemon=True).start())
+
+    # 창 폭을 내용에 맞춘다. 기본 560 으로 모자라면(버튼이 넓은 환경) 조회 기간의 날짜칸이
+    # 폭 1px 로 눌려 사라진다 — 시간칸이 없는 약속처방 탭은 입력칸이 하나도 안 보이게 된다.
+    root.update_idletasks()
+    _win_w = min(max(560, root.winfo_reqwidth()), root.winfo_screenwidth())
+    root.resizable(True, True)   # 맥에서 폭 고정 상태로는 geometry 폭이 적용되지 않는다
+    root.geometry(f"{_win_w}x940")
+    root.update_idletasks()
+    root.resizable(False, True)
 
     root.mainloop()
 
