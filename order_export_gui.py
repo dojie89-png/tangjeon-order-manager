@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "22.5"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "22.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -1006,6 +1006,7 @@ BULK_MAX_PACKS = 30  # 팩수 미만이면 벌크 (30개 이상은 별도 박스
 PREMIUM_BOX_SMALL_VOL_ML = 70   # 파우치용량이 이 값 이하면
 PREMIUM_BOX_SMALL_CAP    = 60   # 60포까지 (그 위는 51포)
 PIL_BOX_CAP              = 40   # 필한방 3곳 큰 박스 (보통 박스는 20포)
+GORAE_PANAM_BOX_CAP      = 50   # 고래 판암점은 한 박스에 50포까지 들어간다
 PREMIUM_BOX_CAP          = 51   # 51포로 나가는 경우가 있어 51까지 한 박스
 
 
@@ -1018,7 +1019,7 @@ def _pouch_volume_ml(v) -> int | None:
 def get_box_capacity(clinic: str, box_type: str, pouch_volume=None) -> int | None:
     """박스 유형·한의원 기준 박스당 최대 포수. None이면 분할 안 함.
     판정 순서:
-      1) 고래한방 — 항상 전용박스 30포 (오창 포함, 박스포장 무시)
+      1) 고래한방 — 박스포장 무시. 판암점 50포, 나머지 지점(관저·세종·오창) 30포
       2) 고급박스(1·2 공통) — 한의원 상관없이 51포까지 한 박스,
          파우치용량 70ml 이하면 60포까지
       3) 필한방 3곳(대전필·청주필·성동필) — 고급박스 표시가 없을 때 40포까지 한 박스
@@ -1029,7 +1030,9 @@ def get_box_capacity(clinic: str, box_type: str, pouch_volume=None) -> int | Non
     c = clean_text(str(clinic or ""))
     b = clean_text(str(box_type or ""))
     if "고래" in c:
-        return 30  # 관저·판암·세종·오창 등 모든 고래 지점 30포 (큰박스 폐지)
+        if "판암" in c:
+            return GORAE_PANAM_BOX_CAP
+        return 30  # 관저·세종·오창 30포 (큰박스 폐지)
     # 고급박스1 / 고급박스2 / "고급박스"만 적힌 경우 — 띄어쓴 표기도 인식
     if re.search(r"고급\s*박스", b):
         _vol = _pouch_volume_ml(pouch_volume)
