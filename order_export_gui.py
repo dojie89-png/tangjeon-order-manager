@@ -28,7 +28,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "22.6"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "22.7"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -4636,19 +4636,17 @@ def run_job(settings: dict, progress_callback=None):
                     return (-ts, idx)   # dt 내림차순, 동률은 idx 오름차순(작은=최신 앞)
             print_queue.sort(key=_print_sort_key)
             # ── 2단계: 인쇄 묶음 정렬
-            # 고래한방은 옵션과 무관하게 직배송(환자) 묶음 → 벌크 묶음 순서로 모은다.
+            # 고래한방은 옵션과 무관하게 직배송 묶음 → 벌크 묶음 순서로 모은다.
+            # 한의원으로 택배라도 30포 이상 등 별도 박스는 따로 송장을 붙여 나가므로 직배송 묶음에 넣는다.
             # 그 외 한의원은 "한의원별로 묶어서 출력" 옵션이 켜진 경우에만 묶는다.
             def _print_group_sort_key(p):
                 hospital = clean_text(p.get("hospital", ""))
                 is_gorae = is_gorae_hospital_folder(hospital)
                 if is_gorae:
-                    delivery_type = clean_text(p.get("delivery_type", ""))
                     if p.get("bulk"):
                         delivery_group = 1       # 벌크
-                    elif "한의원으로 택배" in delivery_type:
-                        delivery_group = 2       # 30포 이상 등 별도 박스 한의원택배
                     else:
-                        delivery_group = 0       # 환자 직배송
+                        delivery_group = 0       # 환자 직배송 + 별도 박스 한의원택배
                     branch = extract_gorae_branch(hospital) or "기타"
                     return (0, delivery_group, branch)
                 if settings.get("print_by_hospital"):
