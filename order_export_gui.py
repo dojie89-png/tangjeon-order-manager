@@ -17,6 +17,7 @@ import html
 import ctypes
 from ctypes import wintypes
 from datetime import datetime, timedelta
+import calendar
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -28,7 +29,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "23.0"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "23.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -8743,6 +8744,115 @@ def launch_gui():
 
         entry.bind("<FocusIn>",  _in)
         entry.bind("<FocusOut>", _out)
+        if text == "YYYY-MM-DD":
+            _attach_date_picker(entry)
+
+    # ── 달력 선택 (날짜칸 오른쪽 📅 아이콘) ──
+    #   직접 입력은 그대로 되고, 아이콘을 누르면 달력에서 고를 수 있다.
+    _cal_state = {"win": None}
+
+    def _attach_date_picker(entry):
+        # 아이콘이 날짜 글자를 가리지 않도록 칸을 조금 넓힌다
+        entry.config(width=int(entry.cget("width")) + 3)
+        icon = tk.Label(entry, text="📅", bg=entry.cget("bg"), cursor="hand2", bd=0, padx=0, pady=0)
+        icon.place(relx=1.0, x=-3, rely=0.5, anchor="e")
+        icon.bind("<Button-1>", lambda e: _open_date_picker(entry))
+
+    def _open_date_picker(entry):
+        old = _cal_state.get("win")
+        if old is not None:
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
+        try:
+            sel = datetime.strptime(_ph_get(entry)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            sel = None
+        today = datetime.today().date()
+        view = [(sel or today).year, (sel or today).month]
+
+        win = tk.Toplevel(root)
+        _cal_state["win"] = win
+        win.title("날짜 선택")
+        win.resizable(False, False)
+        win.transient(root)
+        win.configure(bg="white")
+
+        head = tk.Frame(win, bg="white")
+        head.pack(fill="x", padx=8, pady=(8, 4))
+        title_lbl = tk.Label(head, bg="white", fg="black", font=("", 11, "bold"))
+        days = tk.Frame(win, bg="white")
+        days.pack(padx=8)
+
+        def shift(n):
+            y, m = view
+            m += n
+            y += (m - 1) // 12
+            m = (m - 1) % 12 + 1
+            view[:] = [y, m]
+            draw()
+
+        def pick(d):
+            _ph_set_date(entry, d.strftime("%Y-%m-%d"))
+            win.destroy()
+
+        def _nav(text, n):
+            lb = tk.Label(head, text=text, bg="white", fg="#333", cursor="hand2", padx=6)
+            lb.bind("<Button-1>", lambda e: shift(n))
+            return lb
+
+        _nav("◀", -1).pack(side="left")
+        _nav("▶", 1).pack(side="right")
+        title_lbl.pack(side="left", expand=True)
+
+        def draw():
+            for w in days.winfo_children():
+                w.destroy()
+            y, m = view
+            title_lbl.config(text=f"{y}년 {m}월")
+            for c, wd in enumerate("일월화수목금토"):
+                fg = "#C62828" if c == 0 else ("#1565C0" if c == 6 else "#555")
+                tk.Label(days, text=wd, bg="white", fg=fg, width=3).grid(row=0, column=c, pady=(0, 2))
+            for r, week in enumerate(calendar.Calendar(firstweekday=6).monthdatescalendar(y, m), start=1):
+                for c, d in enumerate(week):
+                    if d.month != m:
+                        fg = "#BBBBBB"
+                    elif c == 0:
+                        fg = "#C62828"
+                    elif c == 6:
+                        fg = "#1565C0"
+                    else:
+                        fg = "black"
+                    bg = "white"
+                    font = ("", 10)
+                    if d == today:
+                        bg, font = "#E3F2FD", ("", 10, "bold")
+                    if d == sel:
+                        bg, fg = "#0078D4", "white"
+                    cell = tk.Label(days, text=str(d.day), bg=bg, fg=fg, font=font,
+                                    width=3, pady=3, cursor="hand2")
+                    cell.grid(row=r, column=c, padx=1, pady=1)
+                    cell.bind("<Button-1>", lambda e, _d=d: pick(_d))
+                    if d != sel:
+                        cell.bind("<Enter>", lambda e, w=cell: w.config(bg="#DCEBFA"))
+                        cell.bind("<Leave>", lambda e, w=cell, b=bg: w.config(bg=b))
+
+        foot = tk.Frame(win, bg="white")
+        foot.pack(fill="x", padx=8, pady=(4, 8))
+        ttk.Button(foot, text="오늘", width=6, command=lambda: pick(today)).pack(side="left")
+        ttk.Button(foot, text="닫기", width=6, command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
+
+        draw()
+        win.update_idletasks()
+        x = entry.winfo_rootx()
+        y = entry.winfo_rooty() + entry.winfo_height() + 2
+        x = max(0, min(x, win.winfo_screenwidth() - win.winfo_reqwidth()))
+        if y + win.winfo_reqheight() > win.winfo_screenheight():
+            y = max(0, entry.winfo_rooty() - win.winfo_reqheight() - 2)
+        win.geometry(f"+{x}+{y}")
+        win.focus_set()
 
     def _ph_get(entry):
         """placeholder 상태면 빈 문자열 반환, 아니면 실제 값 반환."""
