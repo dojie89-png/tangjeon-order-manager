@@ -29,7 +29,7 @@ import http.server
 import socketserver
 
 
-APP_VERSION = "23.1"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
+APP_VERSION = "23.2"  # 버전 관리: 소수점 = 기능추가/버그수정, 정수 = 대규모 개편
 
 
 # ── windowed exe 보호: sys.stdout/stderr 가 None 이면 print()·traceback 출력이
@@ -3404,6 +3404,17 @@ def _is_kejin_tangjeon_sender(name: str) -> bool:
     return bool(s) and "케이진" in s and "원외탕전실" in s
 
 
+def _is_kejin_sender_name(name: str) -> bool:
+    """보내는분성명이 케이진 쪽인지 ('케이진 원외탕전실', '케이진바이오제약' 등)"""
+    return "케이진" in re.sub(r"\s+", "", clean_text(name))
+
+
+def _is_personal_receiver(name: str) -> bool:
+    """받는분이 한의원·병원·케이진이 아닌 개인(환자)으로 보이는지"""
+    n = clean_text(name)
+    return bool(n) and "케이진" not in n and not any(kw in n for kw in _CLINIC_NAME_KEYWORDS)
+
+
 def sort_cj_upload_df(df: pd.DataFrame) -> pd.DataFrame:
     """CJ 업로드 양식 정렬: 상호 → 보내는분주소 → 품목명.
     송장 출력 시 같은 병원/같은 보내는 주소끼리 붙어 나오도록.
@@ -3519,6 +3530,11 @@ def build_cj_upload_df(master_results: list, pdf_jobs: list) -> pd.DataFrame:
             _orderer = clean_text(base_row.get("회원명", ""))
             if _orderer:
                 _sender_name = _orderer
+        elif _sangho and _is_kejin_sender_name(_sender_name) and _is_personal_receiver(receiver_name):
+            # 상호가 있는데 환자에게 직접 보내면서 보내는분을 케이진으로 적은 건 →
+            # 이름만 한의원명으로 바꾼다 (주소·전화는 그대로).
+            # 받는분이 한의원 자신(한의원으로 택배)이면 그대로 둔다.
+            _sender_name = _sangho
         return [
             format_order_date_only(base_row.get("주문날짜", "")), # A 주문날짜
             ordercode_str,                                       # B 고객주문번호
